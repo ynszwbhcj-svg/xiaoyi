@@ -1,0 +1,9 @@
+{
+  "id": "xiaoyi",
+  "channels": ["xiaoyi"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {}
+  }
+}
