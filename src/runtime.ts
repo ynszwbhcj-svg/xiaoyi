@@ -16,7 +16,7 @@ export interface TimeoutConfig {
 const DEFAULT_TIMEOUT_CONFIG: TimeoutConfig = {
   enabled: true,
   duration: 60000, // 60 seconds
-  message: "任务还在处理中，请稍后回来查看",
+  message: "任务正在处理中，请稍后",
 };
 
 /**
@@ -37,6 +37,9 @@ export class XiaoYiRuntime {
 
   // AbortController management for canceling agent runs
   private sessionAbortControllerMap: Map<string, AbortController> = new Map();
+
+  // Track if a session has an active agent run (for concurrent request detection)
+  private sessionActiveRunMap: Map<string, boolean> = new Map();
 
   constructor() {
     this.instanceId = `runtime_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -151,7 +154,12 @@ export class XiaoYiRuntime {
    * Set timeout for a session
    * @param sessionId - Session ID
    * @param callback - Function to call when timeout occurs
-   * @returns The timeout ID (for cancellation)
+   * @returns The interval ID (for cancellation)
+   *
+   * IMPORTANT: This now uses setInterval instead of setTimeout
+   * - First trigger: after 60 seconds
+   * - Subsequent triggers: every 60 seconds after that
+   * - Cleared when: response received, session completed, or explicitly cleared
    */
   setTimeoutForSession(sessionId: string, callback: () => void): NodeJS.Timeout | undefined {
     if (!this.timeoutConfig.enabled) {
@@ -165,36 +173,37 @@ export class XiaoYiRuntime {
 
     this.clearSessionTimeout(sessionId);
 
-    // Also clear the timeout sent flag to allow this session to timeout again
+    // Clear the timeout sent flag to allow this session to timeout again
     if (hadSentTimeout) {
       this.sessionTimeoutSent.delete(sessionId);
       console.log(`[TIMEOUT] Previous timeout flag cleared for session ${sessionId} (session reuse)`);
     }
 
-    const timeoutId = setTimeout(() => {
-      console.log(`[TIMEOUT] Timeout triggered for session ${sessionId}`);
-      this.sessionTimeoutMap.delete(sessionId);
+    // Use setInterval for periodic timeout triggers
+    // First trigger after duration, then every duration after that
+    const intervalId = setInterval(() => {
+      console.log(`[TIMEOUT] Timeout triggered for session ${sessionId} (will trigger again in ${this.timeoutConfig.duration}ms if still active)`);
       this.sessionTimeoutSent.add(sessionId);
       callback();
     }, this.timeoutConfig.duration);
 
-    this.sessionTimeoutMap.set(sessionId, timeoutId);
-    const logSuffix = hadExistingTimeout ? " (replacing existing timeout)" : "";
-    console.log(`[TIMEOUT] ${this.timeoutConfig.duration}ms timeout started for session ${sessionId}${logSuffix}`);
+    this.sessionTimeoutMap.set(sessionId, intervalId);
+    const logSuffix = hadExistingTimeout ? " (replacing existing interval)" : "";
+    console.log(`[TIMEOUT] ${this.timeoutConfig.duration}ms periodic timeout started for session ${sessionId}${logSuffix}`);
 
-    return timeoutId;
+    return intervalId;
   }
 
   /**
-   * Clear timeout for a session
+   * Clear timeout interval for a session
    * @param sessionId - Session ID
    */
   clearSessionTimeout(sessionId: string): void {
-    const timeoutId = this.sessionTimeoutMap.get(sessionId);
-    if (timeoutId) {
-      clearTimeout(timeoutId);
+    const intervalId = this.sessionTimeoutMap.get(sessionId);
+    if (intervalId) {
+      clearInterval(intervalId);
       this.sessionTimeoutMap.delete(sessionId);
-      console.log(`[TIMEOUT] Timeout cleared for session ${sessionId}`);
+      console.log(`[TIMEOUT] Timeout interval cleared for session ${sessionId}`);
     }
   }
 
@@ -217,15 +226,15 @@ export class XiaoYiRuntime {
   }
 
   /**
-   * Clear all timeouts
+   * Clear all timeout intervals
    */
   clearAllTimeouts(): void {
-    for (const [sessionId, timeoutId] of this.sessionTimeoutMap.entries()) {
-      clearTimeout(timeoutId);
+    for (const [sessionId, intervalId] of this.sessionTimeoutMap.entries()) {
+      clearInterval(intervalId);
     }
     this.sessionTimeoutMap.clear();
     this.sessionTimeoutSent.clear();
-    console.log("[TIMEOUT] All timeouts cleared");
+    console.log("[TIMEOUT] All timeout intervals cleared");
   }
 
   /**
@@ -273,17 +282,30 @@ export class XiaoYiRuntime {
   /**
    * Create and register an AbortController for a session
    * @param sessionId - Session ID
-   * @returns The AbortController and its signal
+   * @returns The AbortController and its signal, or null if session is busy
    */
-  createAbortControllerForSession(sessionId: string): { controller: AbortController; signal: AbortSignal } {
-    // Abort any existing controller for this session
-    this.abortSession(sessionId);
+  createAbortControllerForSession(sessionId: string): { controller: AbortController; signal: AbortSignal } | null {
+    // Check if there's an active agent run for this session
+    if (this.sessionActiveRunMap.get(sessionId)) {
+      console.log(`[CONCURRENT] Session ${sessionId} has an active agent run, cannot create new AbortController`);
+      return null;
+    }
 
     const controller = new AbortController();
     this.sessionAbortControllerMap.set(sessionId, controller);
+    this.sessionActiveRunMap.set(sessionId, true);
     console.log(`[ABORT] Created AbortController for session ${sessionId}`);
 
     return { controller, signal: controller.signal };
+  }
+
+  /**
+   * Check if a session has an active agent run
+   * @param sessionId - Session ID
+   * @returns true if session is busy
+   */
+  isSessionActive(sessionId: string): boolean {
+    return this.sessionActiveRunMap.get(sessionId) || false;
   }
 
   /**
@@ -323,6 +345,9 @@ export class XiaoYiRuntime {
       this.sessionAbortControllerMap.delete(sessionId);
       console.log(`[ABORT] Cleared AbortController for session ${sessionId}`);
     }
+    // Also clear the active run flag
+    this.sessionActiveRunMap.delete(sessionId);
+    console.log(`[CONCURRENT] Session ${sessionId} marked as inactive`);
   }
 
   /**

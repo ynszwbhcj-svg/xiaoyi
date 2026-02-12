@@ -661,6 +661,31 @@ export class XiaoYiWebSocketManager extends EventEmitter {
   }
 
   /**
+   * Send PUSH message (主动推送) via HTTP API
+   *
+   * This is used when SubAgent completes execution and needs to push results to user
+   * independently of the original A2A request-response flow.
+   *
+   * Unlike sendResponse (which responds to a specific request via WebSocket), push messages are
+   * sent through HTTP API asynchronously.
+   *
+   * @param sessionId - User's session ID
+   * @param message - Message content to push
+   *
+   * Reference: 华为小艺推送消息 API
+   * TODO: 实现实际的推送消息发送逻辑
+   */
+  async sendPushMessage(
+    sessionId: string,
+    message: string
+  ): Promise<void> {
+    console.log(`[PUSH] Would send push message to session ${sessionId}, length: ${message.length} chars`);
+    console.log(`[PUSH] Content: ${message.substring(0, 50)}${message.length > 50 ? "..." : ""}`);
+    // TODO: Implement actual push message sending via HTTP API
+    // Need to confirm correct push message format with XiaoYi API documentation
+  }
+
+  /**
    * Send tasks cancel response to specific server
    */
   async sendTasksCancelResponse(
