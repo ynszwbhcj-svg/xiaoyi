@@ -24,6 +24,12 @@ import {
 } from "./xiaoyi-media";
 
 /**
+ * Track if message handlers have been registered to prevent duplicate registrations
+ * when startAccount() is called multiple times due to auto-restart attempts
+ */
+let handlersRegistered = false;
+
+/**
  * Resolved XiaoYi account configuration (single account mode)
  */
 export interface ResolvedXiaoYiAccount {
@@ -275,16 +281,36 @@ export const xiaoyiPlugin = {
       const config = ctx.cfg;
 
       // Start WebSocket connection (single account mode)
-      await runtime.start(resolvedAccount.config);
-
-      // Setup message handler IMMEDIATELY after connection is established
-      const connection = runtime.getConnection();
-      if (!connection) {
-        throw new Error("Failed to get WebSocket connection after start");
+      // Wrap in try-catch to prevent startup errors from causing auto-restart
+      let connection = null;
+      try {
+        await runtime.start(resolvedAccount.config);
+        connection = runtime.getConnection();
+      } catch (error) {
+        console.error("XiaoYi: [STARTUP] Failed to start WebSocket connection:", error);
+        // Don't throw - let the connection retry logic handle reconnection
+        // The runtime.start() will handle reconnection internally
       }
 
-      // Setup message handler
-      connection.on("message", async (message: A2ARequestMessage) => {
+      // Setup message handler IMMEDIATELY after connection is established
+      if (!connection) {
+        connection = runtime.getConnection();
+      }
+
+      if (!connection) {
+        console.warn("XiaoYi: [STARTUP] No WebSocket connection available yet, will retry...");
+        // Throw error to prevent auto-restart - let runtime handle reconnection
+        // The runtime.start() will keep trying to reconnect internally
+        throw new Error("XiaoYi: WebSocket connection not available, runtime will retry");
+      }
+
+      // Only register handlers once to prevent duplicate message processing
+      // when startAccount() is called multiple times due to auto-restart attempts
+      if (!handlersRegistered) {
+        console.log("XiaoYi: [STARTUP] Registering message and cancel handlers");
+
+        // Setup message handler with try-catch to prevent individual message errors from crashing the channel
+        connection.on("message", async (message: A2ARequestMessage) => {
         // CRITICAL: Use dynamic require to get the latest runtime module after hot-reload
         const { getXiaoYiRuntime } = require("./runtime");
         const runtime = getXiaoYiRuntime();
@@ -845,8 +871,31 @@ export const xiaoyiPlugin = {
         runtime.markSessionCompleted(sessionId);
       });
 
+        // Mark handlers as registered to prevent duplicate registration
+        handlersRegistered = true;
+      } else {
+        console.log("XiaoYi: [STARTUP] Handlers already registered, skipping duplicate registration");
+      }
+
       console.log("XiaoYi: Event handlers registered");
-      console.log("XiaoYi: startAccount() completed - END");
+
+      // Keep the channel running by waiting for the abort signal
+      // This prevents the Promise from resolving, keeping 'running' status as true
+      // The channel will stop when stopAccount() is called or the abort signal is triggered
+      await new Promise<void>((resolve) => {
+        ctx.abortSignal.addEventListener("abort", () => {
+          console.log("XiaoYi: abort signal received, stopping channel");
+          resolve();
+        }, { once: true });
+
+        // Also handle case where abort is already triggered
+        if (ctx.abortSignal.aborted) {
+          console.log("XiaoYi: abort signal already triggered");
+          resolve();
+        }
+      });
+
+      console.log("XiaoYi: startAccount() exiting - END");
     },
 
     stopAccount: async (ctx: ChannelGatewayContext<ResolvedXiaoYiAccount>) => {
