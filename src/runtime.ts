@@ -41,6 +41,17 @@ export class XiaoYiRuntime {
   // Track if a session has an active agent run (for concurrent request detection)
   private sessionActiveRunMap: Map<string, boolean> = new Map();
 
+  // Track session start time for timeout detection
+  private sessionStartTimeMap: Map<string, number> = new Map();
+
+  // Maximum time a session can be active before we consider it stale (5 minutes)
+  private static readonly SESSION_STALE_TIMEOUT_MS = 5 * 60 * 1000;
+
+  // 4-minute task timeout mechanism
+  private sessionTaskTimeoutMap: Map<string, NodeJS.Timeout> = new Map();
+  private sessionPushPendingMap: Map<string, boolean> = new Map();
+  private taskTimeoutMs: number = 240000; // Default 4 minutes
+
   constructor() {
     this.instanceId = `runtime_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     console.log(`XiaoYi: Created new runtime instance: ${this.instanceId}`);
@@ -133,6 +144,10 @@ export class XiaoYiRuntime {
     this.clearAllTimeouts();
     // Clear all abort controllers
     this.clearAllAbortControllers();
+    // Clear all task timeout state
+    for (const sessionId of this.sessionTaskTimeoutMap.keys()) {
+      this.clearTaskTimeoutState(sessionId);
+    }
   }
 
   /**
@@ -294,6 +309,7 @@ export class XiaoYiRuntime {
     const controller = new AbortController();
     this.sessionAbortControllerMap.set(sessionId, controller);
     this.sessionActiveRunMap.set(sessionId, true);
+    this.sessionStartTimeMap.set(sessionId, Date.now());
     console.log(`[ABORT] Created AbortController for session ${sessionId}`);
 
     return { controller, signal: controller.signal };
@@ -301,11 +317,31 @@ export class XiaoYiRuntime {
 
   /**
    * Check if a session has an active agent run
+   * If session is active but stale (超过 SESSION_STALE_TIMEOUT_MS), automatically clean up
    * @param sessionId - Session ID
    * @returns true if session is busy
    */
   isSessionActive(sessionId: string): boolean {
-    return this.sessionActiveRunMap.get(sessionId) || false;
+    const isActive = this.sessionActiveRunMap.get(sessionId) || false;
+
+    if (isActive) {
+      // Check if the session has been active for too long
+      const startTime = this.sessionStartTimeMap.get(sessionId);
+      if (startTime) {
+        const elapsed = Date.now() - startTime;
+        if (elapsed > XiaoYiRuntime.SESSION_STALE_TIMEOUT_MS) {
+          // Session is stale, auto-cleanup and return false
+          console.log(`[CONCURRENT] Session ${sessionId} is stale (active for ${elapsed}ms), auto-cleaning`);
+          this.clearAbortControllerForSession(sessionId);
+          this.clearTaskIdForSession(sessionId);
+          this.clearSessionTimeout(sessionId);
+          this.sessionStartTimeMap.delete(sessionId);
+          return false;
+        }
+      }
+    }
+
+    return isActive;
   }
 
   /**
@@ -347,6 +383,8 @@ export class XiaoYiRuntime {
     }
     // Also clear the active run flag
     this.sessionActiveRunMap.delete(sessionId);
+    // Clear the session start time
+    this.sessionStartTimeMap.delete(sessionId);
     console.log(`[CONCURRENT] Session ${sessionId} marked as inactive`);
   }
 
@@ -357,6 +395,105 @@ export class XiaoYiRuntime {
     this.sessionAbortControllerMap.clear();
     console.log("[ABORT] All AbortControllers cleared");
   }
+
+  // ==================== PUSH STATE MANAGEMENT HELPERS ====================
+
+  /**
+   * Generate a composite key for session+task combination
+   * This ensures each task has its own push state, even within the same session
+   */
+  private getPushStateKey(sessionId: string, taskId: string): string {
+    return `${sessionId}:${taskId}`;
+  }
+
+  // ==================== END PUSH STATE MANAGEMENT HELPERS ====================
+
+  // ==================== 4-MINUTE TASK TIMEOUT METHODS ====================
+
+  /**
+   * Set task timeout time (from configuration)
+   */
+  setTaskTimeout(timeoutMs: number): void {
+    this.taskTimeoutMs = timeoutMs;
+    console.log(`[TASK TIMEOUT] Task timeout set to ${timeoutMs}ms`);
+  }
+
+  /**
+   * Set a 4-minute task timeout timer for a session
+   * @returns timeout ID
+   */
+  setTaskTimeoutForSession(
+    sessionId: string,
+    taskId: string,
+    callback: (sessionId: string, taskId: string) => void
+  ): NodeJS.Timeout {
+    this.clearTaskTimeoutForSession(sessionId);
+
+    const timeoutId = setTimeout(() => {
+      console.log(`[TASK TIMEOUT] ${this.taskTimeoutMs}ms timeout triggered for session ${sessionId}, task ${taskId}`);
+      callback(sessionId, taskId);
+    }, this.taskTimeoutMs);
+
+    this.sessionTaskTimeoutMap.set(sessionId, timeoutId);
+    console.log(`[TASK TIMEOUT] ${this.taskTimeoutMs}ms task timeout started for session ${sessionId}`);
+    return timeoutId;
+  }
+
+  /**
+   * Clear the task timeout timer for a session
+   */
+  clearTaskTimeoutForSession(sessionId: string): void {
+    const timeoutId = this.sessionTaskTimeoutMap.get(sessionId);
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      this.sessionTaskTimeoutMap.delete(sessionId);
+      console.log(`[TASK TIMEOUT] Timeout cleared for session ${sessionId}`);
+    }
+  }
+
+  /**
+   * Check if session+task is waiting for push notification
+   * @param sessionId - Session ID
+   * @param taskId - Task ID (optional, for per-task tracking)
+   */
+  isSessionWaitingForPush(sessionId: string, taskId?: string): boolean {
+    const key = taskId ? this.getPushStateKey(sessionId, taskId) : sessionId;
+    return this.sessionPushPendingMap.get(key) === true;
+  }
+
+  /**
+   * Mark session+task as waiting for push notification
+   * @param sessionId - Session ID
+   * @param taskId - Task ID (optional, for per-task tracking)
+   */
+  markSessionWaitingForPush(sessionId: string, taskId?: string): void {
+    const key = taskId ? this.getPushStateKey(sessionId, taskId) : sessionId;
+    this.sessionPushPendingMap.set(key, true);
+    const taskInfo = taskId ? `, task ${taskId}` : '';
+    console.log(`[PUSH] Session ${sessionId}${taskInfo} marked as waiting for push`);
+  }
+
+  /**
+   * Clear the waiting push state for a session+task
+   * @param sessionId - Session ID
+   * @param taskId - Task ID (optional, for per-task tracking)
+   */
+  clearSessionWaitingForPush(sessionId: string, taskId?: string): void {
+    const key = taskId ? this.getPushStateKey(sessionId, taskId) : sessionId;
+    this.sessionPushPendingMap.delete(key);
+    const taskInfo = taskId ? `, task ${taskId}` : '';
+    console.log(`[PUSH] Session ${sessionId}${taskInfo} cleared from waiting for push`);
+  }
+
+  /**
+   * Clear all task timeout related state for a session
+   */
+  clearTaskTimeoutState(sessionId: string): void {
+    this.clearTaskTimeoutForSession(sessionId);
+    this.clearSessionWaitingForPush(sessionId);
+    console.log(`[TASK TIMEOUT] All timeout state cleared for session ${sessionId}`);
+  }
+  // ==================== END 4-MINUTE TASK TIMEOUT METHODS ====================
 }
 
 // Global runtime instance - use global object to survive module reloads

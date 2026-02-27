@@ -1,5 +1,4 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { xiaoyiPlugin } from "./channel";
 import { setXiaoYiRuntime } from "./runtime";
 
@@ -18,19 +17,16 @@ import { setXiaoYiRuntime } from "./runtime";
  *       "wsUrl2": "ws://localhost:8766/ws/link",
  *       "ak": "test_ak",
  *       "sk": "test_sk",
- *       "agentId": "your-agent-id",
- *       "enableStreaming": true
+ *       "agentId": "your-agent-id"
  *     }
  *   }
  * }
- *
- * Backward compatibility: Can use "wsUrl" instead of "wsUrl1" (wsUrl2 will use default)
  */
 const plugin = {
   id: "xiaoyi",
   name: "XiaoYi Channel",
   description: "XiaoYi channel plugin with A2A protocol support",
-  configSchema: emptyPluginConfigSchema(),
+  configSchema: undefined,
   register(api: OpenClawPluginApi) {
     console.log("XiaoYi: register() called - START");
 

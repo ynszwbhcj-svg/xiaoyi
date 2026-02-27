@@ -9,10 +9,13 @@ export const XiaoYiConfigSchema = z.object({
   name: z.string().optional(),
 
   /** Whether this channel is enabled */
-  enabled: z.boolean().optional().default(true),
+  enabled: z.boolean().optional().default(false),
 
-  /** WebSocket URL for A2A connection */
-  wsUrl: z.string().optional(),
+  /** First WebSocket server URL */
+  wsUrl1: z.string().optional().default("wss://hag.cloud.huawei.com/openclaw/v1/ws/link"),
+
+  /** Second WebSocket server URL */
+  wsUrl2: z.string().optional().default("wss://116.63.174.231/openclaw/v1/ws/link"),
 
   /** Access Key for authentication */
   ak: z.string().optional(),
@@ -25,9 +28,6 @@ export const XiaoYiConfigSchema = z.object({
 
   /** Enable debug logging */
   debug: z.boolean().optional().default(false),
-
-  /** Enable streaming responses (default: false) */
-  enableStreaming: z.boolean().optional().default(false),
 
   /** Multi-account configuration */
   accounts: z.record(z.string(), z.unknown()).optional(),

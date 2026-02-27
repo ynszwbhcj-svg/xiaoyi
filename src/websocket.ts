@@ -20,6 +20,7 @@ import {
   ServerConnectionState,
   DEFAULT_WS_URL_1,
   DEFAULT_WS_URL_2,
+  SessionCleanupState,
 } from "./types";
 
 export class XiaoYiWebSocketManager extends EventEmitter {
@@ -44,6 +45,11 @@ export class XiaoYiWebSocketManager extends EventEmitter {
 
   // ==================== Session → Server Mapping ====================
   private sessionServerMap = new Map<string, ServerId>();
+
+  // ==================== Session Cleanup State ====================
+  // Track sessions that are pending cleanup (user cleared context but task still running)
+  private sessionCleanupStateMap = new Map<string, SessionCleanupState>();
+  private static readonly DEFAULT_CLEANUP_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour
 
   // ==================== Auth & Config ====================
   private auth: XiaoYiAuth;
@@ -158,6 +164,7 @@ export class XiaoYiWebSocketManager extends EventEmitter {
       ak: userConfig.ak,
       sk: userConfig.sk,
       enableStreaming: userConfig.enableStreaming ?? true,
+      sessionCleanupTimeoutMs: userConfig.sessionCleanupTimeoutMs ?? XiaoYiWebSocketManager.DEFAULT_CLEANUP_TIMEOUT_MS,
     };
   }
 
@@ -334,6 +341,14 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     this.sessionServerMap.clear();
     this.activeTasks.clear();
 
+    // Cleanup session cleanup state map
+    for (const [sessionId, state] of this.sessionCleanupStateMap.entries()) {
+      if (state.cleanupTimeoutId) {
+        clearTimeout(state.cleanupTimeoutId);
+      }
+    }
+    this.sessionCleanupStateMap.clear();
+
     this.emit("disconnected");
   }
 
@@ -498,6 +513,14 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     isFinal: boolean = true,
     append: boolean = false
   ): Promise<void> {
+    // Check if session is pending cleanup
+    const cleanupState = this.sessionCleanupStateMap.get(sessionId);
+    if (cleanupState) {
+      // Session is pending cleanup, silently discard response
+      console.log(`[RESPONSE] Discarding response for pending cleanup session ${sessionId}`);
+      return;
+    }
+
     // Find which server this session belongs to
     const targetServer = this.sessionServerMap.get(sessionId);
 
@@ -599,6 +622,14 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     message: string,
     targetServer?: ServerId
   ): Promise<void> {
+    // Check if session is pending cleanup
+    const cleanupState = this.sessionCleanupStateMap.get(sessionId);
+    if (cleanupState) {
+      // Session is pending cleanup, silently discard status updates
+      console.log(`[STATUS] Discarding status update for pending cleanup session ${sessionId}`);
+      return;
+    }
+
     const serverId = targetServer || this.sessionServerMap.get(sessionId);
 
     if (!serverId) {
@@ -756,8 +787,8 @@ export class XiaoYiWebSocketManager extends EventEmitter {
       serverId: sourceServer,
     });
 
-    // Remove session mapping
-    this.sessionServerMap.delete(sessionId);
+    // Mark session for cleanup instead of immediate deletion
+    this.markSessionForCleanup(sessionId, sourceServer, this.config.sessionCleanupTimeoutMs ?? XiaoYiWebSocketManager.DEFAULT_CLEANUP_TIMEOUT_MS);
   }
 
   /**
@@ -775,7 +806,8 @@ export class XiaoYiWebSocketManager extends EventEmitter {
       serverId: sourceServer,
     });
 
-    this.sessionServerMap.delete(message.sessionId);
+    // Mark session for cleanup instead of immediate deletion
+    this.markSessionForCleanup(message.sessionId, sourceServer, this.config.sessionCleanupTimeoutMs ?? XiaoYiWebSocketManager.DEFAULT_CLEANUP_TIMEOUT_MS);
   }
 
   /**
@@ -1137,5 +1169,96 @@ export class XiaoYiWebSocketManager extends EventEmitter {
    */
   removeSession(sessionId: string): void {
     this.sessionServerMap.delete(sessionId);
+  }
+
+  /**
+   * Mark a session for delayed cleanup
+   * @param sessionId The session ID to mark for cleanup
+   * @param serverId The server ID associated with this session
+   * @param timeoutMs Timeout in milliseconds before forcing cleanup
+   */
+  private markSessionForCleanup(sessionId: string, serverId: ServerId, timeoutMs: number): void {
+    // Check if already marked
+    const existingState = this.sessionCleanupStateMap.get(sessionId);
+    if (existingState) {
+      // Already pending cleanup, reset timeout
+      if (existingState.cleanupTimeoutId) {
+        clearTimeout(existingState.cleanupTimeoutId);
+      }
+      console.log(`[CLEANUP] Session ${sessionId} already pending cleanup, resetting timeout`);
+    }
+
+    // Create new cleanup state
+    const newState: SessionCleanupState = {
+      sessionId,
+      serverId,
+      markedForCleanupAt: Date.now(),
+      reason: 'user_cleared',
+    };
+
+    // Start cleanup timeout
+    const timeoutId = setTimeout(() => {
+      console.log(`[CLEANUP] Timeout reached for session ${sessionId}, forcing cleanup`);
+      this.forceCleanupSession(sessionId);
+    }, timeoutMs);
+
+    newState.cleanupTimeoutId = timeoutId;
+    this.sessionCleanupStateMap.set(sessionId, newState);
+
+    console.log(`[CLEANUP] Session ${sessionId} marked for cleanup (timeout: ${timeoutMs}ms)`);
+  }
+
+  /**
+   * Force cleanup a session immediately
+   * @param sessionId The session ID to cleanup
+   */
+  forceCleanupSession(sessionId: string): void {
+    // Check if already cleaned
+    const state = this.sessionCleanupStateMap.get(sessionId);
+    if (!state) {
+      console.log(`[CLEANUP] Session ${sessionId} already cleaned up, skipping`);
+      return;
+    }
+
+    // Clear timeout
+    if (state.cleanupTimeoutId) {
+      clearTimeout(state.cleanupTimeoutId);
+    }
+
+    // Remove from both maps
+    this.sessionServerMap.delete(sessionId);
+    this.sessionCleanupStateMap.delete(sessionId);
+
+    console.log(`[CLEANUP] Session ${sessionId} cleanup completed`);
+  }
+
+  /**
+   * Check if a session is pending cleanup
+   * @param sessionId The session ID to check
+   * @returns True if session is pending cleanup
+   */
+  isSessionPendingCleanup(sessionId: string): boolean {
+    return this.sessionCleanupStateMap.has(sessionId);
+  }
+
+  /**
+   * Get cleanup state for a session
+   * @param sessionId The session ID to check
+   * @returns Cleanup state if exists, undefined otherwise
+   */
+  getSessionCleanupState(sessionId: string): SessionCleanupState | undefined {
+    return this.sessionCleanupStateMap.get(sessionId);
+  }
+
+  /**
+   * Update accumulated text for a pending cleanup session
+   * @param sessionId The session ID
+   * @param text The accumulated text
+   */
+  updateAccumulatedTextForCleanup(sessionId: string, text: string): void {
+    const state = this.sessionCleanupStateMap.get(sessionId);
+    if (state) {
+      state.accumulatedText = text;
+    }
   }
 }

@@ -63,6 +63,64 @@ export const xiaoyiPlugin = {
     nativeCommands: false,
   },
 
+  /**
+   * Config schema for UI form rendering
+   */
+  configSchema: {
+    schema: {
+      type: "object",
+      properties: {
+        enabled: {
+          type: "boolean",
+          default: false,
+          description: "Enable XiaoYi channel",
+        },
+        wsUrl1: {
+          type: "string",
+          default: "wss://hag.cloud.huawei.com/openclaw/v1/ws/link",
+          description: "Primary WebSocket server URL",
+        },
+        wsUrl2: {
+          type: "string",
+          default: "wss://116.63.174.231/openclaw/v1/ws/link",
+          description: "Secondary WebSocket server URL",
+        },
+        ak: {
+          type: "string",
+          description: "Access Key",
+        },
+        sk: {
+          type: "string",
+          description: "Secret Key",
+        },
+        agentId: {
+          type: "string",
+          description: "Agent ID",
+        },
+        debug: {
+          type: "boolean",
+          default: false,
+          description: "Enable debug logging",
+        },
+        apiId: {
+          type: "string",
+          default: "",
+          description: "API ID for push notifications",
+        },
+        pushId: {
+          type: "string",
+          default: "",
+          description: "Push ID for push notifications",
+        },
+        taskTimeoutMs: {
+          type: "number",
+          default: 240000,
+          description: "Task timeout in milliseconds (default: 4 minutes)",
+        },
+      },
+    },
+  },
+
   onboarding: xiaoyiOnboardingAdapter,
 
   /**
@@ -322,11 +380,15 @@ export const xiaoyiPlugin = {
         // where the outer scope's resolvedAccount might become unavailable
         const messageHandlerAgentId = resolvedAccount.config?.agentId;
         const messageHandlerAccountId = resolvedAccount.accountId;
+        const messageHandlerConfig = resolvedAccount.config;
 
         if (!messageHandlerAgentId) {
           console.error("XiaoYi: [FATAL] agentId not available in resolvedAccount.config");
           return;
         }
+
+        // Set task timeout time from configuration
+        runtime.setTaskTimeout(messageHandlerConfig.taskTimeoutMs || 240000);
 
         console.log(`XiaoYi: [Message Handler] Stored config values - agentId: ${messageHandlerAgentId}, accountId: ${messageHandlerAccountId}`);
 
@@ -509,7 +571,6 @@ export const xiaoyiPlugin = {
           const startTime = Date.now();
           let accumulatedText = "";
           let sentTextLength = 0; // Track sent text length for streaming
-          let hasSentFinal = false; // Track if final content has been sent (to prevent duplicate isFinal=true)
 
           // ==================== CREATE ABORT CONTROLLER ====================
           // Create AbortController for this session to allow cancelation
@@ -521,18 +582,17 @@ export const xiaoyiPlugin = {
           const { controller: abortController, signal: abortSignal } = abortControllerResult;
           // ================================================================
 
-          // ==================== START TIMEOUT PROTECTION ====================
-          // Start periodic 60-second timeout timer
-          // Will trigger every 60 seconds until a response is received or session completes
-          const timeoutConfig = runtime.getTimeoutConfig();
-          console.log(`[TIMEOUT] Starting ${timeoutConfig.duration}ms periodic timeout protection for session ${sessionId}`);
+          // ==================== 4-MINUTE TASK TIMEOUT PROTECTION ====================
+          // Start 4-minute task timeout timer
+          // Will trigger once after 4 minutes if no response received
+          console.log(`[TASK TIMEOUT] Starting ${messageHandlerConfig.taskTimeoutMs || 240000}ms task timeout protection for session ${sessionId}`);
 
-          // Define periodic timeout handler (will be called every 60 seconds)
-          const createTimeoutHandler = (): (() => Promise<void>) => {
-            return async () => {
+          // Define task timeout handler (will be called once after 4 minutes)
+          const createTaskTimeoutHandler = (): ((sessionId: string, taskId: string) => Promise<void>) => {
+            return async (timeoutSessionId: string, timeoutTaskId: string) => {
               const elapsed = Date.now() - startTime;
               console.log("\n" + "=".repeat(60));
-              console.log(`[TIMEOUT] Timeout triggered for session ${sessionId}`);
+              console.log(`[TASK TIMEOUT] 4-minute timeout triggered for session ${sessionId}`);
               console.log(`  Elapsed: ${elapsed}ms`);
               console.log(`  Task ID: ${currentTaskId}`);
               console.log("=".repeat(60) + "\n");
@@ -540,22 +600,62 @@ export const xiaoyiPlugin = {
               const conn = runtime.getConnection();
               if (conn) {
                 try {
-                  // Send status update to keep conversation active
+                  // Send default message with isFinal=true
+                  await conn.sendResponse({
+                    sessionId: timeoutSessionId,
+                    messageId: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                    timestamp: Date.now(),
+                    agentId: messageHandlerAgentId,
+                    sender: { id: messageHandlerAgentId, name: "OpenClaw Agent", type: "agent" },
+                    content: { type: "text", text: "任务还在处理中，完成后将提醒您~" },
+                    status: "success",
+                  }, timeoutTaskId, timeoutSessionId, true, false);  // isFinal=true
+
+                  console.log(`[TASK TIMEOUT] Default message sent (isFinal=true) to session ${timeoutSessionId}\n`);
+                } catch (error) {
+                  console.error(`[TASK TIMEOUT] Failed to send default message:`, error);
+                }
+              }
+
+              // Cancel 60-second periodic timeout
+              runtime.clearSessionTimeout(timeoutSessionId);
+
+              // Mark as waiting for push state
+              runtime.markSessionWaitingForPush(timeoutSessionId, timeoutTaskId);
+            };
+          };
+
+          // Start 4-minute task timeout timer
+          runtime.setTaskTimeoutForSession(sessionId, currentTaskId, createTaskTimeoutHandler());
+
+          // Also start 60-second periodic timeout for status updates (for messages before 4-minute timeout)
+          const timeoutConfig = runtime.getTimeoutConfig();
+          const createPeriodicTimeoutHandler = (): (() => Promise<void>) => {
+            return async () => {
+              // Skip if already waiting for push (4-minute timeout already triggered)
+              if (runtime.isSessionWaitingForPush(sessionId, currentTaskId)) {
+                return;
+              }
+
+              const elapsed = Date.now() - startTime;
+              console.log("\n" + "=".repeat(60));
+              console.log(`[TIMEOUT] Periodic timeout triggered for session ${sessionId}`);
+              console.log(`  Elapsed: ${elapsed}ms`);
+              console.log("=".repeat(60) + "\n");
+
+              const conn = runtime.getConnection();
+              if (conn) {
+                try {
                   await conn.sendStatusUpdate(currentTaskId, sessionId, timeoutConfig.message);
                   console.log(`[TIMEOUT] Status update sent successfully to session ${sessionId}\n`);
                 } catch (error) {
                   console.error(`[TIMEOUT] Failed to send status update:`, error);
                 }
-              } else {
-                console.error(`[TIMEOUT] Connection not available, cannot send status update\n`);
               }
-              // Note: Timeout will trigger again in 60 seconds if still active
             };
           };
-
-          // Start periodic timeout
-          runtime.setTimeoutForSession(sessionId, createTimeoutHandler());
-          // ==================== END TIMEOUT PROTECTION ====================
+          runtime.setTimeoutForSession(sessionId, createPeriodicTimeoutHandler());
+          // ==================== END TASK TIMEOUT PROTECTION ====================
 
           // ==================== CREATE STREAMING DISPATCHER ====================
           // Use createReplyDispatcherWithTyping for real-time streaming feedback
@@ -591,6 +691,12 @@ export const xiaoyiPlugin = {
                 // Check multiple sources: payload.status, payload.queuedFinal, AND info.kind
                 // info.kind is the most reliable indicator for final messages
                 const isFinal = payloadStatus === "final" || payload.queuedFinal === true || kind === "final";
+
+                // If session is waiting for push (4-minute timeout occurred), ignore non-final responses
+                if (runtime.isSessionWaitingForPush(sessionId, currentTaskId) && !payload.queuedFinal && info.kind !== "final") {
+                  console.log(`[TASK TIMEOUT] Ignoring non-final response for session ${sessionId} (already timed out)`);
+                  return;
+                }
 
                 accumulatedText = text;
 
@@ -678,18 +784,14 @@ export const xiaoyiPlugin = {
                     status: responseStatus,
                   };
 
-                  // ==================== FIX: Prevent duplicate final messages ====================
-                  // Only send isFinal=true if we haven't sent it before AND this is actually the final message
-                  const shouldSendFinal = isFinal && !hasSentFinal;
+                  // ==================== FIX: Always send isFinal=false in deliver ====================
+                  // All responses from deliver callback are sent with isFinal=false
+                  // The final isFinal=true will be sent in onIdle callback when ALL processing is complete
+                  const shouldSendFinal = false;
 
                   try {
                     await conn.sendResponse(response, currentTaskId, sessionId, shouldSendFinal, isAppend);
-                    console.log("✓ Sent (status=" + responseStatus + ", isFinal=" + shouldSendFinal + ", append=" + isAppend + ")\n");
-
-                    // Mark that we've sent a final message (even if we're still processing subagent responses)
-                    if (isFinal) {
-                      hasSentFinal = true;
-                    }
+                    console.log("✓ Sent (status=" + responseStatus + ", isFinal=false, append=" + isAppend + ")\n");
                   } catch (error) {
                     console.error("✗ Failed to send:", error);
                   }
@@ -717,7 +819,16 @@ export const xiaoyiPlugin = {
                 console.log("=".repeat(60) + "\n");
 
                 runtime.clearSessionTimeout(sessionId);
+                runtime.clearTaskTimeoutForSession(sessionId);
+                runtime.clearSessionWaitingForPush(sessionId, currentTaskId);
                 runtime.clearAbortControllerForSession(sessionId);
+
+                // Check if session was cleared
+                const conn = runtime.getConnection();
+                if (conn && conn.isSessionPendingCleanup(sessionId)) {
+                  conn.forceCleanupSession(sessionId);
+                }
+
                 runtime.markSessionCompleted(sessionId);
               },
               onIdle: async () => {
@@ -727,13 +838,87 @@ export const xiaoyiPlugin = {
                 console.log("  Total time: " + elapsed + "ms");
                 console.log("=".repeat(60) + "\n");
 
-                // ==================== PUSH MESSAGE FOR BACKGROUND RESULTS ====================
-                // NOTE: Push logic disabled because we cannot reliably distinguish between:
-                // - Normal responses (should be sent via WebSocket)
-                // - Background task completion (should be sent via HTTP push)
-                // TODO: Implement proper push message detection and HTTP API call
-                console.log("[IDLE] All agent processing complete");
-                // ==================== END PUSH MESSAGE ====================
+                // Clear 4-minute task timeout timer
+                runtime.clearTaskTimeoutForSession(sessionId);
+
+                // ==================== CHECK IF SESSION WAS CLEARED ====================
+                const conn = runtime.getConnection();
+                const isPendingCleanup = conn && conn.isSessionPendingCleanup(sessionId);
+                const isWaitingForPush = runtime.isSessionWaitingForPush(sessionId, currentTaskId);
+
+                // ==================== PUSH NOTIFICATION LOGIC ====================
+                // Send push if task timeout was triggered (regardless of session cleanup status)
+                // This ensures users get notified when long-running tasks complete
+                if (isWaitingForPush && accumulatedText.length > 0) {
+                  const pushReason = isPendingCleanup
+                    ? `Session ${sessionId} was cleared`
+                    : `Session ${sessionId} task timeout triggered`;
+                  console.log(`[CLEANUP] ${pushReason}, sending push notification`);
+
+                  try {
+                    const { XiaoYiPushService } = require("./push");
+                    const pushService = new XiaoYiPushService(messageHandlerConfig);
+
+                    if (pushService.isConfigured()) {
+                      // Generate summary
+                      const summary = accumulatedText.length > 30
+                        ? accumulatedText.substring(0, 30) + "..."
+                        : accumulatedText;
+
+                      await pushService.sendPush(summary, "后台任务已完成：" + summary);
+                      console.log("✓ [CLEANUP] Push notification sent\n");
+
+                      // Clear push waiting state for this specific task
+                      runtime.clearSessionWaitingForPush(sessionId, currentTaskId);
+                    } else {
+                      console.log("[CLEANUP] Push not configured, skipping notification");
+                      runtime.clearSessionWaitingForPush(sessionId, currentTaskId);
+                    }
+                  } catch (error) {
+                    console.error("[CLEANUP] Error sending push:", error);
+                    runtime.clearSessionWaitingForPush(sessionId, currentTaskId);
+                  }
+
+                  // If session was cleared, update cleanup state
+                  if (isPendingCleanup) {
+                    conn?.updateAccumulatedTextForCleanup(sessionId, accumulatedText);
+                    conn?.forceCleanupSession(sessionId);
+                  }
+                }
+                // ==================== NORMAL WEBSOCKET FLOW (no timeout triggered) ====================
+                else if (!isPendingCleanup) {
+                  // Normal flow: send WebSocket response (no timeout, session still active)
+                  const conn = runtime.getConnection();
+                  if (conn) {
+                    try {
+                      await conn.sendResponse({
+                        sessionId: sessionId,
+                        messageId: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                        timestamp: Date.now(),
+                        agentId: messageHandlerAgentId,
+                        sender: {
+                          id: messageHandlerAgentId,
+                          name: "OpenClaw Agent",
+                          type: "agent",
+                        },
+                        content: {
+                          type: "text",
+                          text: accumulatedText,
+                        },
+                        status: "success",
+                      }, currentTaskId, sessionId, true, false);  // isFinal=true, append=false
+                      console.log("✓ [IDLE] Final response sent (isFinal=true)\n");
+                    } catch (error) {
+                      console.error("✗ [IDLE] Failed to send final response:", error);
+                    }
+                  }
+                }
+                // ==================== SESSION CLEARED BUT NO TIMEOUT ====================
+                else {
+                  // Session was cleared but no timeout triggered - edge case, just cleanup
+                  console.log(`[CLEANUP] Session ${sessionId} was cleared but no push needed`);
+                  conn?.forceCleanupSession(sessionId);
+                }
 
                 // This is called AFTER all processing is done (including subagents)
                 // NOW we can safely mark the session as completed
@@ -835,6 +1020,8 @@ export const xiaoyiPlugin = {
             console.error("XiaoYi: [ERROR] Error dispatching message:", error);
             // Clear timeout on error
             runtime.clearSessionTimeout(sessionId);
+            runtime.clearTaskTimeoutForSession(sessionId);
+            runtime.clearSessionWaitingForPush(sessionId, currentTaskId);
             // Clear abort controller on error
             runtime.clearAbortControllerForSession(sessionId);
             // Mark session as completed on error
@@ -867,8 +1054,35 @@ export const xiaoyiPlugin = {
           console.log(`[CANCEL] No active agent run found for session ${sessionId}`);
         }
 
-        // Clear timeout as the session is being canceled
+        // Clear timeout and push state as the session is being canceled
+        runtime.clearTaskTimeoutForSession(sessionId);
+        runtime.clearSessionWaitingForPush(sessionId, data.taskId);
         runtime.markSessionCompleted(sessionId);
+      });
+
+      // Handle clear context events
+      connection.on("clear", async (data: any) => {
+        const { sessionId, serverId } = data;
+
+        console.log("\n" + "=".repeat(60));
+        console.log("[CLEAR] Context cleared by user");
+        console.log(`  Session: ${sessionId}`);
+        console.log("=".repeat(60) + "\n");
+
+        // Check if there's an active task for this session
+        const hasActiveTask = runtime.isSessionActive(sessionId);
+
+        if (hasActiveTask) {
+          console.log(`[CLEAR] Active task exists for session ${sessionId}, will continue in background`);
+          // Session is already marked for cleanup in websocket.ts
+          // Just track that we're waiting for completion
+        } else {
+          console.log(`[CLEAR] No active task for session ${sessionId}, clean up immediately`);
+          const conn = runtime.getConnection();
+          if (conn) {
+            conn.forceCleanupSession(sessionId);
+          }
+        }
       });
 
         // Mark handlers as registered to prevent duplicate registration

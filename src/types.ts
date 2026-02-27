@@ -179,6 +179,18 @@ export interface XiaoYiChannelConfig {
   sk: string;
   agentId: string;
   enableStreaming?: boolean;  // Enable streaming responses (default: false)
+
+  // Push notification configuration (optional)
+  apiId?: string;          // API ID, for push messages (optional)
+  pushId?: string;         // Push ID, for push messages (optional)
+  taskTimeoutMs?: number;  // Task timeout in milliseconds, default 240000 (4 minutes)
+
+  /**
+   * Session cleanup timeout in milliseconds
+   * When user clears context, old sessions are cleaned up after this timeout
+   * Default: 1 hour (60 * 60 * 1000)
+   */
+  sessionCleanupTimeoutMs?: number;
 }
 
 export interface AuthCredentials {
@@ -209,6 +221,7 @@ export interface InternalWebSocketConfig {
   ak: string;
   sk: string;
   enableStreaming?: boolean;
+  sessionCleanupTimeoutMs?: number;
 }
 
 // Server identifier type
@@ -220,4 +233,16 @@ export interface ServerConnectionState {
   ready: boolean;
   lastHeartbeat: number;
   reconnectAttempts: number;
+}
+
+/**
+ * Session cleanup state for delayed cleanup
+ */
+export interface SessionCleanupState {
+  sessionId: string;
+  serverId: ServerId;
+  markedForCleanupAt: number; // Timestamp when marked for cleanup
+  cleanupTimeoutId?: NodeJS.Timeout; // Timeout ID for auto-cleanup
+  reason: 'user_cleared' | 'timeout' | 'error';
+  accumulatedText?: string; // Track accumulated text for push notification
 }
