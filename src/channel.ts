@@ -658,283 +658,291 @@ export const xiaoyiPlugin = {
           // ==================== END TASK TIMEOUT PROTECTION ====================
 
           // ==================== CREATE STREAMING DISPATCHER ====================
-          // Use createReplyDispatcherWithTyping for real-time streaming feedback
-          const { dispatcher, replyOptions, markDispatchIdle } =
-            pluginRuntime.channel.reply.createReplyDispatcherWithTyping({
-              humanDelay: 0,
-              onReplyStart: async () => {
-                const elapsed = Date.now() - startTime;
+          // ==================== DISPATCHER OPTIONS ====================
+          // Define dispatcher options for dispatchInboundMessageWithBufferedDispatcher
+          // This uses the standard OpenClaw pattern which properly handles dispatcher lifecycle
+          const dispatcherOptions = {
+            humanDelay: 0,
+            onReplyStart: async () => {
+              const elapsed = Date.now() - startTime;
+              console.log("\n" + "=".repeat(60));
+              console.log("XiaoYi: [START] Reply started after " + elapsed + "ms");
+              console.log("  Session: " + sessionId);
+              console.log("  Task ID: " + currentTaskId);
+              console.log("=".repeat(60) + "\n");
+
+              // Send immediate status update to let user know Agent is working
+              const conn = runtime.getConnection();
+              if (conn) {
+                try {
+                  await conn.sendStatusUpdate(currentTaskId, sessionId, "任务正在处理中，请稍后");
+                  console.log("✓ [START] Initial status update sent\n");
+                } catch (error) {
+                  console.error("✗ [START] Failed to send initial status update:", error);
+                }
+              }
+            },
+            deliver: async (payload: any, info: { kind: "tool" | "block" | "final" }) => {
+              const elapsed = Date.now() - startTime;
+              const text = payload.text || "";
+              const kind = info.kind;
+              const payloadStatus = payload.status;
+
+              // IMPORTANT: Check if this is actually the final message
+              // Check multiple sources: payload.status, payload.queuedFinal, AND info.kind
+              // info.kind is the most reliable indicator for final messages
+              const isFinal = payloadStatus === "final" || payload.queuedFinal === true || kind === "final";
+
+              // If session is waiting for push (1-hour timeout occurred), ignore non-final responses
+              if (runtime.isSessionWaitingForPush(sessionId, currentTaskId) && !payload.queuedFinal && info.kind !== "final") {
+                console.log(`[TASK TIMEOUT] Ignoring non-final response for session ${sessionId} (already timed out)`);
+                return;
+              }
+
+              accumulatedText = text;
+
+              console.log("\n" + "█".repeat(70));
+              console.log("📨 [DELIVER] Payload received");
+              console.log("  Session: " + sessionId);
+              console.log("  Elapsed: " + elapsed + "ms");
+              console.log("  Info Kind: \"" + kind + "\"");
+              console.log("  Payload Status: \"" + (payloadStatus || "unknown") + "\"");
+              console.log("  Is Final: " + isFinal);
+              console.log("  Text length: " + text.length + " chars");
+              console.log("  Sent so far: " + sentTextLength + " chars");
+              if (text.length > 0) {
+                console.log("  Text preview: \"" + text.substring(0, 80) + (text.length > 80 ? "..." : "") + "\"");
+              }
+              console.log("█".repeat(70) + "\n");
+
+              // Only check for abort, NOT timeout
+              // Timeout is just for user notification, final responses should still be delivered
+              if (runtime.isSessionAborted(sessionId)) {
                 console.log("\n" + "=".repeat(60));
-                console.log("XiaoYi: [START] Reply started after " + elapsed + "ms");
+                console.log("[ABORT] Response received AFTER abort");
                 console.log("  Session: " + sessionId);
-                console.log("  Task ID: " + currentTaskId);
+                console.log("  Action: DISCARDING");
+                console.log("=".repeat(60) + "\n");
+                return;
+              }
+
+              // NOTE: We DON'T check timeout here anymore
+              // Even if timeout occurred, we should still deliver the final response
+              // Timeout was just to keep user informed, not to discard results
+
+              const conn = runtime.getConnection();
+              if (!conn) {
+                console.error("✗ XiaoYi: Connection not available\n");
+                return;
+              }
+
+              // ==================== FIX: Empty text handling ====================
+              // If text is empty but this is not final, ALWAYS send a status update
+              // This ensures user gets feedback for EVERY Agent activity (tool calls, subagent calls, etc.)
+              if ((!text || text.length === 0) && !isFinal) {
+                console.log("\n" + "=".repeat(60));
+                console.log("[STREAM] Empty " + kind + " response detected");
+                console.log("  Session: " + sessionId);
+                console.log("  Action: Sending status update (no throttling)");
                 console.log("=".repeat(60) + "\n");
 
-                // Send immediate status update to let user know Agent is working
+                try {
+                  await conn.sendStatusUpdate(currentTaskId, sessionId, "任务正在处理中，请稍后");
+                  console.log("✓ Status update sent\n");
+                } catch (error) {
+                  console.error("✗ Failed to send status update:", error);
+                }
+                return;
+              }
+              // ==================== END FIX ====================
+
+              const responseStatus = isFinal ? "success" : "processing";
+              const incrementalText = text.slice(sentTextLength);
+
+              // ==================== FIX: Always send isFinal=false in deliver ====================
+              // All responses from deliver callback are sent with isFinal=false
+              // The final isFinal=true will be sent in onIdle callback when ALL processing is complete
+              const shouldSendFinal = false;
+
+              // Compute isAppend based on shouldSendFinal (not isFinal payload property)
+              // This ensures consistency between what we log and what we actually send
+              const isAppend = !shouldSendFinal && incrementalText.length > 0;
+
+              if (incrementalText.length > 0 || isFinal) {
+                console.log("\n" + "-".repeat(60));
+                console.log("XiaoYi: [STREAM] Sending response");
+                console.log("  Response Status: " + responseStatus);
+                console.log("  Is Final: " + isFinal);
+                console.log("  Is Append: " + isAppend);
+                console.log("-".repeat(60) + "\n");
+
+                const response: A2AResponseMessage = {
+                  sessionId: sessionId,
+                  messageId: "msg_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9),
+                  timestamp: Date.now(),
+                  agentId: messageHandlerAgentId,  // Use stored value instead of resolvedAccount.config.agentId
+                  sender: {
+                    id: messageHandlerAgentId,  // Use stored value instead of resolvedAccount.config.agentId
+                    name: "OpenClaw Agent",
+                    type: "agent",
+                  },
+                  content: {
+                    type: "text",
+                    text: isFinal ? text : incrementalText,
+                  },
+                  status: responseStatus,
+                };
+
+                try {
+                  await conn.sendResponse(response, currentTaskId, sessionId, shouldSendFinal, isAppend);
+                  console.log("✓ Sent (status=" + responseStatus + ", isFinal=false, append=" + isAppend + ")\n");
+                } catch (error) {
+                  console.error("✗ Failed to send:", error);
+                }
+
+                sentTextLength = text.length;
+              }
+
+              // ==================== FIX: SubAgent-friendly cleanup logic ====================
+              // Only mark session as completed if we're truly done (no more subagent responses expected)
+              // The key insight: we should NOT cleanup on every "final" payload, because subagents
+              // can generate additional responses after the main agent returns "final".
+              //
+              // Instead, we let onIdle handle the cleanup, which is called after ALL processing is done.
+              if (isFinal) {
+                // Clear timeout but DON'T mark session as completed yet
+                // SubAgent might still send more responses
+                runtime.clearSessionTimeout(sessionId);
+                console.log("[CLEANUP] Final payload received, but NOT marking session completed yet (waiting for onIdle)\n");
+              }
+              // ==================== END FIX ====================
+            },
+            onError: (err: Error, info: any) => {
+              console.error("\n" + "=".repeat(60));
+              console.error("XiaoYi: [ERROR] " + info.kind + " failed: " + String(err));
+              console.log("=".repeat(60) + "\n");
+
+              runtime.clearSessionTimeout(sessionId);
+              runtime.clearTaskTimeoutForSession(sessionId);
+              runtime.clearSessionWaitingForPush(sessionId, currentTaskId);
+              runtime.clearAbortControllerForSession(sessionId);
+
+              // Check if session was cleared
+              const conn = runtime.getConnection();
+              if (conn && conn.isSessionPendingCleanup(sessionId)) {
+                conn.forceCleanupSession(sessionId);
+              }
+
+              runtime.markSessionCompleted(sessionId);
+            },
+            onIdle: async () => {
+              const elapsed = Date.now() - startTime;
+              console.log("\n" + "=".repeat(60));
+              console.log("XiaoYi: [IDLE] Processing complete");
+              console.log("  Total time: " + elapsed + "ms");
+              console.log("=".repeat(60) + "\n");
+
+              // Clear 1-hour task timeout timer
+              runtime.clearTaskTimeoutForSession(sessionId);
+
+              // ==================== CHECK IF SESSION WAS CLEARED ====================
+              const conn = runtime.getConnection();
+              const isPendingCleanup = conn && conn.isSessionPendingCleanup(sessionId);
+              const isWaitingForPush = runtime.isSessionWaitingForPush(sessionId, currentTaskId);
+
+              // ==================== PUSH NOTIFICATION LOGIC ====================
+              // Send push if task timeout was triggered (regardless of session cleanup status)
+              // This ensures users get notified when long-running tasks complete
+              if (isWaitingForPush && accumulatedText.length > 0) {
+                const pushReason = isPendingCleanup
+                  ? `Session ${sessionId} was cleared`
+                  : `Session ${sessionId} task timeout triggered`;
+                console.log(`[CLEANUP] ${pushReason}, sending push notification`);
+
+                try {
+                  const { XiaoYiPushService } = require("./push");
+                  const pushService = new XiaoYiPushService(messageHandlerConfig);
+
+                  if (pushService.isConfigured()) {
+                    // Generate summary
+                    const summary = accumulatedText.length > 30
+                      ? accumulatedText.substring(0, 30) + "..."
+                      : accumulatedText;
+
+                    await pushService.sendPush(summary, "后台任务已完成：" + summary);
+                    console.log("✓ [CLEANUP] Push notification sent\n");
+
+                    // Clear push waiting state for this specific task
+                    runtime.clearSessionWaitingForPush(sessionId, currentTaskId);
+                  } else {
+                    console.log("[CLEANUP] Push not configured, skipping notification");
+                    runtime.clearSessionWaitingForPush(sessionId, currentTaskId);
+                  }
+                } catch (error) {
+                  console.error("[CLEANUP] Error sending push:", error);
+                  runtime.clearSessionWaitingForPush(sessionId, currentTaskId);
+                }
+
+                // If session was cleared, update cleanup state
+                if (isPendingCleanup) {
+                  conn?.updateAccumulatedTextForCleanup(sessionId, accumulatedText);
+                  conn?.forceCleanupSession(sessionId);
+                }
+              }
+              // ==================== NORMAL WEBSOCKET FLOW (no timeout triggered) ====================
+              else if (!isPendingCleanup) {
+                // Normal flow: send WebSocket response (no timeout, session still active)
                 const conn = runtime.getConnection();
                 if (conn) {
                   try {
-                    await conn.sendStatusUpdate(currentTaskId, sessionId, "任务正在处理中，请稍后");
-                    console.log("✓ [START] Initial status update sent\n");
+                    await conn.sendResponse({
+                      sessionId: sessionId,
+                      messageId: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                      timestamp: Date.now(),
+                      agentId: messageHandlerAgentId,
+                      sender: {
+                        id: messageHandlerAgentId,
+                        name: "OpenClaw Agent",
+                        type: "agent",
+                      },
+                      content: {
+                        type: "text",
+                        text: accumulatedText,
+                      },
+                      status: "success",
+                    }, currentTaskId, sessionId, true, false);  // isFinal=true, append=false
+                    console.log("✓ [IDLE] Final response sent (isFinal=true)\n");
                   } catch (error) {
-                    console.error("✗ [START] Failed to send initial status update:", error);
+                    console.error("✗ [IDLE] Failed to send final response:", error);
                   }
                 }
-              },
-              deliver: async (payload: any, info: { kind: "tool" | "block" | "final" }) => {
-                const elapsed = Date.now() - startTime;
-                const text = payload.text || "";
-                const kind = info.kind;
-                const payloadStatus = payload.status;
+              }
+              // ==================== SESSION CLEARED BUT NO TIMEOUT ====================
+              else {
+                // Session was cleared but no timeout triggered - edge case, just cleanup
+                console.log(`[CLEANUP] Session ${sessionId} was cleared but no push needed`);
+                conn?.forceCleanupSession(sessionId);
+              }
 
-                // IMPORTANT: Check if this is actually the final message
-                // Check multiple sources: payload.status, payload.queuedFinal, AND info.kind
-                // info.kind is the most reliable indicator for final messages
-                const isFinal = payloadStatus === "final" || payload.queuedFinal === true || kind === "final";
-
-                // If session is waiting for push (1-hour timeout occurred), ignore non-final responses
-                if (runtime.isSessionWaitingForPush(sessionId, currentTaskId) && !payload.queuedFinal && info.kind !== "final") {
-                  console.log(`[TASK TIMEOUT] Ignoring non-final response for session ${sessionId} (already timed out)`);
-                  return;
-                }
-
-                accumulatedText = text;
-
-                console.log("\n" + "█".repeat(70));
-                console.log("📨 [DELIVER] Payload received");
-                console.log("  Session: " + sessionId);
-                console.log("  Elapsed: " + elapsed + "ms");
-                console.log("  Info Kind: \"" + kind + "\"");
-                console.log("  Payload Status: \"" + (payloadStatus || "unknown") + "\"");
-                console.log("  Is Final: " + isFinal);
-                console.log("  Text length: " + text.length + " chars");
-                console.log("  Sent so far: " + sentTextLength + " chars");
-                if (text.length > 0) {
-                  console.log("  Text preview: \"" + text.substring(0, 80) + (text.length > 80 ? "..." : "") + "\"");
-                }
-                console.log("█".repeat(70) + "\n");
-
-                // Only check for abort, NOT timeout
-                // Timeout is just for user notification, final responses should still be delivered
-                if (runtime.isSessionAborted(sessionId)) {
-                  console.log("\n" + "=".repeat(60));
-                  console.log("[ABORT] Response received AFTER abort");
-                  console.log("  Session: " + sessionId);
-                  console.log("  Action: DISCARDING");
-                  console.log("=".repeat(60) + "\n");
-                  return;
-                }
-
-                // NOTE: We DON'T check timeout here anymore
-                // Even if timeout occurred, we should still deliver the final response
-                // Timeout was just to keep user informed, not to discard results
-
-                const conn = runtime.getConnection();
-                if (!conn) {
-                  console.error("✗ XiaoYi: Connection not available\n");
-                  return;
-                }
-
-                // ==================== FIX: Empty text handling ====================
-                // If text is empty but this is not final, ALWAYS send a status update
-                // This ensures user gets feedback for EVERY Agent activity (tool calls, subagent calls, etc.)
-                if ((!text || text.length === 0) && !isFinal) {
-                  console.log("\n" + "=".repeat(60));
-                  console.log("[STREAM] Empty " + kind + " response detected");
-                  console.log("  Session: " + sessionId);
-                  console.log("  Action: Sending status update (no throttling)");
-                  console.log("=".repeat(60) + "\n");
-
-                  try {
-                    await conn.sendStatusUpdate(currentTaskId, sessionId, "任务正在处理中，请稍后");
-                    console.log("✓ Status update sent\n");
-                  } catch (error) {
-                    console.error("✗ Failed to send status update:", error);
-                  }
-                  return;
-                }
-                // ==================== END FIX ====================
-
-                const responseStatus = isFinal ? "success" : "processing";
-                const incrementalText = text.slice(sentTextLength);
-                const isAppend = !isFinal && incrementalText.length > 0;
-
-                if (incrementalText.length > 0 || isFinal) {
-                  console.log("\n" + "-".repeat(60));
-                  console.log("XiaoYi: [STREAM] Sending response");
-                  console.log("  Response Status: " + responseStatus);
-                  console.log("  Is Final: " + isFinal);
-                  console.log("  Is Append: " + isAppend);
-                  console.log("-".repeat(60) + "\n");
-
-                  const response: A2AResponseMessage = {
-                    sessionId: sessionId,
-                    messageId: "msg_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9),
-                    timestamp: Date.now(),
-                    agentId: messageHandlerAgentId,  // Use stored value instead of resolvedAccount.config.agentId
-                    sender: {
-                      id: messageHandlerAgentId,  // Use stored value instead of resolvedAccount.config.agentId
-                      name: "OpenClaw Agent",
-                      type: "agent",
-                    },
-                    content: {
-                      type: "text",
-                      text: isFinal ? text : incrementalText,
-                    },
-                    status: responseStatus,
-                  };
-
-                  // ==================== FIX: Always send isFinal=false in deliver ====================
-                  // All responses from deliver callback are sent with isFinal=false
-                  // The final isFinal=true will be sent in onIdle callback when ALL processing is complete
-                  const shouldSendFinal = false;
-
-                  try {
-                    await conn.sendResponse(response, currentTaskId, sessionId, shouldSendFinal, isAppend);
-                    console.log("✓ Sent (status=" + responseStatus + ", isFinal=false, append=" + isAppend + ")\n");
-                  } catch (error) {
-                    console.error("✗ Failed to send:", error);
-                  }
-
-                  sentTextLength = text.length;
-                }
-
-                // ==================== FIX: SubAgent-friendly cleanup logic ====================
-                // Only mark session as completed if we're truly done (no more subagent responses expected)
-                // The key insight: we should NOT cleanup on every "final" payload, because subagents
-                // can generate additional responses after the main agent returns "final".
-                //
-                // Instead, we let onIdle handle the cleanup, which is called after ALL processing is done.
-                if (isFinal) {
-                  // Clear timeout but DON'T mark session as completed yet
-                  // SubAgent might still send more responses
-                  runtime.clearSessionTimeout(sessionId);
-                  console.log("[CLEANUP] Final payload received, but NOT marking session completed yet (waiting for onIdle)\n");
-                }
-                // ==================== END FIX ====================
-              },
-              onError: (err: Error, info: any) => {
-                console.error("\n" + "=".repeat(60));
-                console.error("XiaoYi: [ERROR] " + info.kind + " failed: " + String(err));
-                console.log("=".repeat(60) + "\n");
-
-                runtime.clearSessionTimeout(sessionId);
-                runtime.clearTaskTimeoutForSession(sessionId);
-                runtime.clearSessionWaitingForPush(sessionId, currentTaskId);
-                runtime.clearAbortControllerForSession(sessionId);
-
-                // Check if session was cleared
-                const conn = runtime.getConnection();
-                if (conn && conn.isSessionPendingCleanup(sessionId)) {
-                  conn.forceCleanupSession(sessionId);
-                }
-
-                runtime.markSessionCompleted(sessionId);
-              },
-              onIdle: async () => {
-                const elapsed = Date.now() - startTime;
-                console.log("\n" + "=".repeat(60));
-                console.log("XiaoYi: [IDLE] Processing complete");
-                console.log("  Total time: " + elapsed + "ms");
-                console.log("=".repeat(60) + "\n");
-
-                // Clear 1-hour task timeout timer
-                runtime.clearTaskTimeoutForSession(sessionId);
-
-                // ==================== CHECK IF SESSION WAS CLEARED ====================
-                const conn = runtime.getConnection();
-                const isPendingCleanup = conn && conn.isSessionPendingCleanup(sessionId);
-                const isWaitingForPush = runtime.isSessionWaitingForPush(sessionId, currentTaskId);
-
-                // ==================== PUSH NOTIFICATION LOGIC ====================
-                // Send push if task timeout was triggered (regardless of session cleanup status)
-                // This ensures users get notified when long-running tasks complete
-                if (isWaitingForPush && accumulatedText.length > 0) {
-                  const pushReason = isPendingCleanup
-                    ? `Session ${sessionId} was cleared`
-                    : `Session ${sessionId} task timeout triggered`;
-                  console.log(`[CLEANUP] ${pushReason}, sending push notification`);
-
-                  try {
-                    const { XiaoYiPushService } = require("./push");
-                    const pushService = new XiaoYiPushService(messageHandlerConfig);
-
-                    if (pushService.isConfigured()) {
-                      // Generate summary
-                      const summary = accumulatedText.length > 30
-                        ? accumulatedText.substring(0, 30) + "..."
-                        : accumulatedText;
-
-                      await pushService.sendPush(summary, "后台任务已完成：" + summary);
-                      console.log("✓ [CLEANUP] Push notification sent\n");
-
-                      // Clear push waiting state for this specific task
-                      runtime.clearSessionWaitingForPush(sessionId, currentTaskId);
-                    } else {
-                      console.log("[CLEANUP] Push not configured, skipping notification");
-                      runtime.clearSessionWaitingForPush(sessionId, currentTaskId);
-                    }
-                  } catch (error) {
-                    console.error("[CLEANUP] Error sending push:", error);
-                    runtime.clearSessionWaitingForPush(sessionId, currentTaskId);
-                  }
-
-                  // If session was cleared, update cleanup state
-                  if (isPendingCleanup) {
-                    conn?.updateAccumulatedTextForCleanup(sessionId, accumulatedText);
-                    conn?.forceCleanupSession(sessionId);
-                  }
-                }
-                // ==================== NORMAL WEBSOCKET FLOW (no timeout triggered) ====================
-                else if (!isPendingCleanup) {
-                  // Normal flow: send WebSocket response (no timeout, session still active)
-                  const conn = runtime.getConnection();
-                  if (conn) {
-                    try {
-                      await conn.sendResponse({
-                        sessionId: sessionId,
-                        messageId: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-                        timestamp: Date.now(),
-                        agentId: messageHandlerAgentId,
-                        sender: {
-                          id: messageHandlerAgentId,
-                          name: "OpenClaw Agent",
-                          type: "agent",
-                        },
-                        content: {
-                          type: "text",
-                          text: accumulatedText,
-                        },
-                        status: "success",
-                      }, currentTaskId, sessionId, true, false);  // isFinal=true, append=false
-                      console.log("✓ [IDLE] Final response sent (isFinal=true)\n");
-                    } catch (error) {
-                      console.error("✗ [IDLE] Failed to send final response:", error);
-                    }
-                  }
-                }
-                // ==================== SESSION CLEARED BUT NO TIMEOUT ====================
-                else {
-                  // Session was cleared but no timeout triggered - edge case, just cleanup
-                  console.log(`[CLEANUP] Session ${sessionId} was cleared but no push needed`);
-                  conn?.forceCleanupSession(sessionId);
-                }
-
-                // This is called AFTER all processing is done (including subagents)
-                // NOW we can safely mark the session as completed
-                runtime.clearAbortControllerForSession(sessionId);
-                runtime.markSessionCompleted(sessionId);
-                console.log("[CLEANUP] Session marked as completed in onIdle\n");
-              },
-            });
+              // This is called AFTER all processing is done (including subagents)
+              // NOW we can safely mark the session as completed
+              runtime.clearAbortControllerForSession(sessionId);
+              runtime.markSessionCompleted(sessionId);
+              console.log("[CLEANUP] Session marked as completed in onIdle\n");
+            },
+          };
 
           try {
-            const result = await pluginRuntime.channel.reply.dispatchReplyFromConfig({
+            // Use standard OpenClaw pattern with dispatchReplyWithBufferedBlockDispatcher
+            // This properly handles dispatcher lifecycle:
+            // 1. Calls dispatcher.markComplete() after run() completes
+            // 2. Waits for waitForIdle() to ensure all deliveries are done
+            // 3. Then calls markDispatchIdle() in the finally block
+            const result = await pluginRuntime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
               ctx: msgContext,
               cfg: config,
-              dispatcher,
+              dispatcherOptions: dispatcherOptions,
               replyOptions: {
-                ...replyOptions,
                 abortSignal: abortSignal,
               },
             });
@@ -1006,13 +1014,15 @@ export const xiaoyiPlugin = {
               // The original Agent might still be running and needs these resources
               // onIdle will be called when the original Agent completes
               console.log("[NO OUTPUT] Keeping resources alive for potential background Agent\n");
-              markDispatchIdle();
+              // Note: No need to call markDispatchIdle() manually
+              // dispatchInboundMessageWithBufferedDispatcher handles this in its finally block
             } else {
               // Scenario 2: Normal execution with output
               // - Agent produced output synchronously
               // - All cleanup is already handled in deliver/onIdle callbacks
               console.log("[NORMAL] Agent produced output, cleanup handled in callbacks");
-              markDispatchIdle();
+              // Note: No need to call markDispatchIdle() manually
+              // dispatchInboundMessageWithBufferedDispatcher handles this in its finally block
             }
             // ==================== END ANALYSIS ====================
 
@@ -1026,8 +1036,8 @@ export const xiaoyiPlugin = {
             runtime.clearAbortControllerForSession(sessionId);
             // Mark session as completed on error
             runtime.markSessionCompleted(sessionId);
-            // Mark dispatcher as idle even on error
-            markDispatchIdle();
+            // Note: No need to call markDispatchIdle() manually
+            // dispatchInboundMessageWithBufferedDispatcher handles this in its finally block
           }
         } catch (error) {
           console.error("XiaoYi: [ERROR] Unexpected error in message handler:", error);

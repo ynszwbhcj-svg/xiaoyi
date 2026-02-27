@@ -876,9 +876,11 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     }> = [];
 
     if (response.content.type === "text" && response.content.text) {
+      // When isFinal=true, use empty string for text (no content needed for final chunk)
+      const textContent = isFinal ? "" : response.content.text;
       parts.push({
         kind: "text",
-        text: response.content.text,
+        text: textContent,
       });
     } else if (response.content.type === "file") {
       parts.push({
@@ -891,10 +893,11 @@ export class XiaoYiWebSocketManager extends EventEmitter {
       });
     }
 
+    // When isFinal=true, append should be true and text should be empty
     const artifactEvent: A2ATaskArtifactUpdateEvent = {
       taskId: taskId,
       kind: "artifact-update",
-      append: append,
+      append: isFinal ? true : append,
       lastChunk: isFinal,
       final: isFinal,
       artifact: {
