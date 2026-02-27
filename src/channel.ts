@@ -114,8 +114,8 @@ export const xiaoyiPlugin = {
         },
         taskTimeoutMs: {
           type: "number",
-          default: 240000,
-          description: "Task timeout in milliseconds (default: 4 minutes)",
+          default: 3600000,
+          description: "Task timeout in milliseconds (default: 1 hour)",
         },
       },
     },
@@ -388,7 +388,7 @@ export const xiaoyiPlugin = {
         }
 
         // Set task timeout time from configuration
-        runtime.setTaskTimeout(messageHandlerConfig.taskTimeoutMs || 240000);
+        runtime.setTaskTimeout(messageHandlerConfig.taskTimeoutMs || 3600000);
 
         console.log(`XiaoYi: [Message Handler] Stored config values - agentId: ${messageHandlerAgentId}, accountId: ${messageHandlerAccountId}`);
 
@@ -582,17 +582,17 @@ export const xiaoyiPlugin = {
           const { controller: abortController, signal: abortSignal } = abortControllerResult;
           // ================================================================
 
-          // ==================== 4-MINUTE TASK TIMEOUT PROTECTION ====================
-          // Start 4-minute task timeout timer
-          // Will trigger once after 4 minutes if no response received
-          console.log(`[TASK TIMEOUT] Starting ${messageHandlerConfig.taskTimeoutMs || 240000}ms task timeout protection for session ${sessionId}`);
+          // ==================== 1-HOUR TASK TIMEOUT PROTECTION ====================
+          // Start 1-hour task timeout timer
+          // Will trigger once after 1 hour if no response received
+          console.log(`[TASK TIMEOUT] Starting ${messageHandlerConfig.taskTimeoutMs || 3600000}ms task timeout protection for session ${sessionId}`);
 
-          // Define task timeout handler (will be called once after 4 minutes)
+          // Define task timeout handler (will be called once after 1 hour)
           const createTaskTimeoutHandler = (): ((sessionId: string, taskId: string) => Promise<void>) => {
             return async (timeoutSessionId: string, timeoutTaskId: string) => {
               const elapsed = Date.now() - startTime;
               console.log("\n" + "=".repeat(60));
-              console.log(`[TASK TIMEOUT] 4-minute timeout triggered for session ${sessionId}`);
+              console.log(`[TASK TIMEOUT] 1-hour timeout triggered for session ${sessionId}`);
               console.log(`  Elapsed: ${elapsed}ms`);
               console.log(`  Task ID: ${currentTaskId}`);
               console.log("=".repeat(60) + "\n");
@@ -625,14 +625,14 @@ export const xiaoyiPlugin = {
             };
           };
 
-          // Start 4-minute task timeout timer
+          // Start 1-hour task timeout timer
           runtime.setTaskTimeoutForSession(sessionId, currentTaskId, createTaskTimeoutHandler());
 
-          // Also start 60-second periodic timeout for status updates (for messages before 4-minute timeout)
+          // Also start 60-second periodic timeout for status updates (for messages before 1-hour timeout)
           const timeoutConfig = runtime.getTimeoutConfig();
           const createPeriodicTimeoutHandler = (): (() => Promise<void>) => {
             return async () => {
-              // Skip if already waiting for push (4-minute timeout already triggered)
+              // Skip if already waiting for push (1-hour timeout already triggered)
               if (runtime.isSessionWaitingForPush(sessionId, currentTaskId)) {
                 return;
               }
@@ -692,7 +692,7 @@ export const xiaoyiPlugin = {
                 // info.kind is the most reliable indicator for final messages
                 const isFinal = payloadStatus === "final" || payload.queuedFinal === true || kind === "final";
 
-                // If session is waiting for push (4-minute timeout occurred), ignore non-final responses
+                // If session is waiting for push (1-hour timeout occurred), ignore non-final responses
                 if (runtime.isSessionWaitingForPush(sessionId, currentTaskId) && !payload.queuedFinal && info.kind !== "final") {
                   console.log(`[TASK TIMEOUT] Ignoring non-final response for session ${sessionId} (already timed out)`);
                   return;
@@ -838,7 +838,7 @@ export const xiaoyiPlugin = {
                 console.log("  Total time: " + elapsed + "ms");
                 console.log("=".repeat(60) + "\n");
 
-                // Clear 4-minute task timeout timer
+                // Clear 1-hour task timeout timer
                 runtime.clearTaskTimeoutForSession(sessionId);
 
                 // ==================== CHECK IF SESSION WAS CLEARED ====================

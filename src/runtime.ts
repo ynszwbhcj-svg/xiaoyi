@@ -47,10 +47,10 @@ export class XiaoYiRuntime {
   // Maximum time a session can be active before we consider it stale (5 minutes)
   private static readonly SESSION_STALE_TIMEOUT_MS = 5 * 60 * 1000;
 
-  // 4-minute task timeout mechanism
+  // 1-hour task timeout mechanism
   private sessionTaskTimeoutMap: Map<string, NodeJS.Timeout> = new Map();
   private sessionPushPendingMap: Map<string, boolean> = new Map();
-  private taskTimeoutMs: number = 240000; // Default 4 minutes
+  private taskTimeoutMs: number = 3600000; // Default 1 hour
 
   constructor() {
     this.instanceId = `runtime_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -408,7 +408,7 @@ export class XiaoYiRuntime {
 
   // ==================== END PUSH STATE MANAGEMENT HELPERS ====================
 
-  // ==================== 4-MINUTE TASK TIMEOUT METHODS ====================
+  // ==================== 1-HOUR TASK TIMEOUT METHODS ====================
 
   /**
    * Set task timeout time (from configuration)
@@ -419,7 +419,7 @@ export class XiaoYiRuntime {
   }
 
   /**
-   * Set a 4-minute task timeout timer for a session
+   * Set a 1-hour task timeout timer for a session
    * @returns timeout ID
    */
   setTaskTimeoutForSession(
@@ -493,7 +493,7 @@ export class XiaoYiRuntime {
     this.clearSessionWaitingForPush(sessionId);
     console.log(`[TASK TIMEOUT] All timeout state cleared for session ${sessionId}`);
   }
-  // ==================== END 4-MINUTE TASK TIMEOUT METHODS ====================
+  // ==================== END 1-HOUR TASK TIMEOUT METHODS ====================
 }
 
 // Global runtime instance - use global object to survive module reloads

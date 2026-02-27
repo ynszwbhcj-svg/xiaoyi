@@ -183,7 +183,7 @@ export interface XiaoYiChannelConfig {
   // Push notification configuration (optional)
   apiId?: string;          // API ID, for push messages (optional)
   pushId?: string;         // Push ID, for push messages (optional)
-  taskTimeoutMs?: number;  // Task timeout in milliseconds, default 240000 (4 minutes)
+  taskTimeoutMs?: number;  // Task timeout in milliseconds, default 3600000 (1 hour)
 
   /**
    * Session cleanup timeout in milliseconds
