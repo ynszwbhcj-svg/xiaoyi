@@ -77,7 +77,7 @@ export interface A2AJsonRpcResponse {
 export interface A2ATaskArtifactUpdateEvent {
   taskId: string;
   kind: "artifact-update";
-  append?: boolean; // 默认为false
+  append?: boolean; // 默认为true
   lastChunk?: boolean; // 默认为true
   final: boolean; // 标识本任务的SSE流是否结束
   artifact: {

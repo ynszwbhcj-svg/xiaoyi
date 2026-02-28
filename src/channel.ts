@@ -764,9 +764,8 @@ export const xiaoyiPlugin = {
               // The final isFinal=true will be sent in onIdle callback when ALL processing is complete
               const shouldSendFinal = false;
 
-              // Compute isAppend based on shouldSendFinal (not isFinal payload property)
-              // This ensures consistency between what we log and what we actually send
-              const isAppend = !shouldSendFinal && incrementalText.length > 0;
+              // Always use append=true for all responses
+              const isAppend = true;
 
               if (incrementalText.length > 0 || isFinal) {
                 console.log("\n" + "-".repeat(60));
@@ -910,7 +909,7 @@ export const xiaoyiPlugin = {
                         text: accumulatedText,
                       },
                       status: "success",
-                    }, currentTaskId, sessionId, true, false);  // isFinal=true, append=false
+                    }, currentTaskId, sessionId, true, true);  // isFinal=true, append=true
                     console.log("✓ [IDLE] Final response sent (isFinal=true)\n");
                   } catch (error) {
                     console.error("✗ [IDLE] Failed to send final response:", error);
@@ -1003,7 +1002,7 @@ export const xiaoyiPlugin = {
                   };
 
                   // Send response with isFinal=true to close THIS request
-                  await conn.sendResponse(response, currentTaskId, sessionId, true, false);
+                  await conn.sendResponse(response, currentTaskId, sessionId, true, true);
                   console.log("✓ [NO OUTPUT] Response sent to user\n");
                 } catch (error) {
                   console.error("✗ [NO OUTPUT] Failed to send response:", error);

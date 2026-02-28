@@ -511,7 +511,7 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     taskId: string,
     sessionId: string,
     isFinal: boolean = true,
-    append: boolean = false
+    append: boolean = true
   ): Promise<void> {
     // Check if session is pending cleanup
     const cleanupState = this.sessionCleanupStateMap.get(sessionId);
@@ -848,7 +848,7 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     response: A2AResponseMessage,
     taskId: string,
     isFinal: boolean = true,
-    append: boolean = false
+    append: boolean = true
   ): A2AJsonRpcResponse {
     const artifactId = `artifact_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
