@@ -2,7 +2,7 @@
  * XiaoYi onboarding adapter for CLI setup wizard.
  */
 
-import type { XiaoYiChannelConfig } from "./types";
+import type { XiaoYiChannelConfig } from "./types.js";
 
 // Local type definitions to avoid build dependency issues
 type OpenClawConfig = any;

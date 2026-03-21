@@ -1,5 +1,5 @@
-import { XiaoYiWebSocketManager } from "./websocket";
-import { XiaoYiChannelConfig } from "./types";
+import { XiaoYiWebSocketManager } from "./websocket.js";
+import { XiaoYiChannelConfig } from "./types.js";
 
 /**
  * Timeout configuration

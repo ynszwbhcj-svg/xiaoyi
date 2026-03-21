@@ -1,5 +1,5 @@
 import * as crypto from "crypto";
-import { XiaoYiChannelConfig } from "./types";
+import { XiaoYiChannelConfig } from "./types.js";
 
 /**
  * Push message sending service

@@ -1,5 +1,5 @@
 import * as crypto from "crypto";
-import { AuthCredentials } from "./types";
+import { AuthCredentials } from "./types.js";
 
 /**
  * Generate authentication signature using AK/SK mechanism

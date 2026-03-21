@@ -1,6 +1,93 @@
 // A2A Message Structure Types
 // Based on: https://developer.huawei.com/consumer/cn/doc/service/message-stream-0000002505761434
 
+// ============================================================================
+// Additional A2A Types from xy_channel (for compatibility)
+// ============================================================================
+
+export interface A2AJsonRpcRequest {
+  jsonrpc: "2.0";
+  method: string;
+  params: A2ARequestParams;
+  id: string;
+}
+
+export interface A2ARequestParams {
+  id: string;
+  sessionId: string;
+  agentLoginSessionId?: string;
+  message: A2AMessage;
+}
+
+export interface A2AMessage {
+  role: "user" | "assistant" | "system";
+  parts: A2AMessagePart[];
+}
+
+export type A2AMessagePart = A2ATextPart | A2AFilePart | A2ADataPart;
+
+export interface A2ATextPart {
+  kind: "text";
+  text: string;
+}
+
+export interface A2AFilePart {
+  kind: "file";
+  file: {
+    name: string;
+    mimeType: string;
+    uri: string;
+  };
+}
+
+export interface A2ADataPart {
+  kind: "data";
+  data: {
+    event?: A2ADataEvent;
+    variables?: {
+      systemVariables?: {
+        push_id?: string;
+      };
+    };
+    [key: string]: any;
+  };
+}
+
+export interface A2ADataEvent {
+  intentName: string;
+  outputs: Record<string, any>;
+  status: "success" | "failed";
+}
+
+export interface A2AReasoningTextPart {
+  kind: "reasoningText";
+  reasoningText: string;
+}
+
+export interface A2ACommandPart {
+  kind: "command";
+  command: A2ACommand;
+}
+
+export interface A2ACommand {
+  header: {
+    namespace: string;
+    name: string;
+  };
+  payload: Record<string, any>;
+}
+
+export type A2AArtifactPart = A2ATextPart | A2ADataPart | A2ACommandPart | A2AReasoningTextPart;
+
+export interface A2AArtifact {
+  artifactId: string;
+  parts: A2AArtifactPart[];
+}
+
+// ============================================================================
+// End of xy_channel types
+// ============================================================================
+
 export interface A2ARequestMessage {
   agentId: string; // Required: must match channel config agentId (custom field)
   jsonrpc: "2.0"; // JSON-RPC 2.0 version
@@ -83,8 +170,9 @@ export interface A2ATaskArtifactUpdateEvent {
   artifact: {
     artifactId: string;
     parts: Array<{
-      kind: "text" | "file" | "data";
+      kind: "text" | "file" | "data" | "reasoningText";
       text?: string;
+      reasoningText?: string;
       file?: {
         name: string;
         mimeType: string;
@@ -246,3 +334,12 @@ export interface SessionCleanupState {
   reason: 'user_cleared' | 'timeout' | 'error';
   accumulatedText?: string; // Track accumulated text for push notification
 }
+
+// Session binding types
+export interface SessionBinding {
+  sessionId: string;
+  server: ServerIdentifier;
+  boundAt: number;
+}
+
+export type ServerIdentifier = 'server1' | 'server2';

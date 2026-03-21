@@ -1,6 +1,6 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { xiaoyiPlugin } from "./channel";
-import { setXiaoYiRuntime } from "./runtime";
+import { xiaoyiPlugin } from "./channel.js";
+import { setXiaoYiRuntime } from "./runtime.js";
 
 /**
  * XiaoYi Channel Plugin for OpenClaw
@@ -35,7 +35,7 @@ const plugin = {
     console.log("XiaoYi: setXiaoYiRuntime() completed");
 
     // Clean up any existing connections from previous plugin loads
-    const runtime = require("./runtime").getXiaoYiRuntime();
+    const runtime = require("./runtime.js").getXiaoYiRuntime();
     console.log(`XiaoYi: Got runtime instance: ${runtime.getInstanceId()}, isConnected: ${runtime.isConnected()}`);
     if (runtime.isConnected()) {
       console.log("XiaoYi: Cleaning up existing connection from previous load");

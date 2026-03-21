@@ -1,7 +1,7 @@
 import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { URL } from "url";
-import { XiaoYiAuth } from "./auth";
+import { XiaoYiAuth } from "./auth.js";
 import {
   A2ARequestMessage,
   A2AResponseMessage,
@@ -21,7 +21,7 @@ import {
   DEFAULT_WS_URL_1,
   DEFAULT_WS_URL_2,
   SessionCleanupState,
-} from "./types";
+} from "./types.js";
 
 export class XiaoYiWebSocketManager extends EventEmitter {
   // ==================== Dual WebSocket Connections ====================
@@ -714,6 +714,50 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     console.log(`[PUSH] Content: ${message.substring(0, 50)}${message.length > 50 ? "..." : ""}`);
     // TODO: Implement actual push message sending via HTTP API
     // Need to confirm correct push message format with XiaoYi API documentation
+  }
+
+  /**
+   * Send an outbound WebSocket message directly.
+   * This is a low-level method that sends a pre-formatted OutboundWebSocketMessage.
+   *
+   * @param sessionId - Session ID for routing
+   * @param message - Pre-formatted outbound message
+   */
+  async sendMessage(
+    sessionId: string,
+    message: OutboundWebSocketMessage
+  ): Promise<void> {
+    // Check if session is pending cleanup
+    const cleanupState = this.sessionCleanupStateMap.get(sessionId);
+    if (cleanupState) {
+      console.log(`[SEND_MESSAGE] Discarding message for pending cleanup session ${sessionId}`);
+      return;
+    }
+
+    // Find which server this session belongs to
+    const targetServer = this.sessionServerMap.get(sessionId);
+
+    if (!targetServer) {
+      console.error(`[SEND_MESSAGE] Unknown server for session ${sessionId}`);
+      throw new Error(`Cannot route message: unknown session ${sessionId}`);
+    }
+
+    // Get the corresponding WebSocket connection
+    const ws = targetServer === 'server1' ? this.ws1 : this.ws2;
+    const state = targetServer === 'server1' ? this.state1 : this.state2;
+
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.error(`[SEND_MESSAGE] ${targetServer} not connected for session ${sessionId}`);
+      throw new Error(`${targetServer} is not available`);
+    }
+
+    try {
+      ws.send(JSON.stringify(message));
+      console.log(`[SEND_MESSAGE] Message sent to ${targetServer} for session ${sessionId}, msgType=${message.msgType}`);
+    } catch (error) {
+      console.error(`[SEND_MESSAGE] Failed to send to ${targetServer}:`, error);
+      throw error;
+    }
   }
 
   /**
