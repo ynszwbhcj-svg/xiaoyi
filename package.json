@@ -2,11 +2,25 @@
   "name": "@ynhcj/xiaoyi",
   "version": "2.5.6",
   "description": "XiaoYi channel plugin for OpenClaw",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "xiaoyi.js",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
   "scripts": {
-    "build": "tsc && node fix-imports.js",
-    "prepublishOnly": "npm run build"
+    "build": "tsc && node fix-imports.cjs",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
   },
   "keywords": [
     "openclaw",
@@ -43,7 +57,7 @@
     }
   },
   "peerDependencies": {
-    "openclaw": "*"
+    "openclaw": ">=2026.3.1"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -61,13 +75,6 @@
     "@types/node-fetch": "^2.6.13",
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.5.10",
-    "openclaw": "^2026.3.13",
     "typescript": "^5.3.3"
-  },
-  "files": [
-    "dist",
-    "xiaoyi.js",
-    "openclaw.plugin.json",
-    "README.md"
-  ]
+  }
 }
