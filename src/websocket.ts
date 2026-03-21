@@ -2,6 +2,7 @@ import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { URL } from "url";
 import { XiaoYiAuth } from "./auth.js";
+import { HeartbeatManager } from "./heartbeat.js";
 import {
   A2ARequestMessage,
   A2AResponseMessage,
@@ -59,6 +60,10 @@ export class XiaoYiWebSocketManager extends EventEmitter {
   private heartbeatTimeout1?: NodeJS.Timeout;
   private heartbeatTimeout2?: NodeJS.Timeout;
   private appHeartbeatInterval?: NodeJS.Timeout;
+
+  // ==================== Heartbeat Managers ====================
+  private heartbeat1?: HeartbeatManager;
+  private heartbeat2?: HeartbeatManager;
 
   // ==================== Reconnect Timers ====================
   private reconnectTimeout1?: NodeJS.Timeout;
@@ -203,9 +208,13 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     console.log(`[Server1] Connecting to ${this.config.wsUrl1}...`);
 
     try {
-      // ✅ Close existing connection before creating new one to prevent ghost connections
+      // ✅ Close existing connection and heartbeat before creating new one
       if (this.ws1) {
         console.log(`[Server1] Closing existing connection before reconnect`);
+        if (this.heartbeat1) {
+          this.heartbeat1.stop();
+          this.heartbeat1 = undefined;
+        }
         try {
           this.ws1.removeAllListeners();
           this.ws1.close();
@@ -227,6 +236,33 @@ export class XiaoYiWebSocketManager extends EventEmitter {
         headers: authHeaders,
         rejectUnauthorized: !skipCertVerify,
       });
+
+      // ✅ Initialize HeartbeatManager for server1
+      this.heartbeat1 = new HeartbeatManager(
+        this.ws1,
+        {
+          interval: 30000, // 30 seconds
+          timeout: 10000,  // 10 seconds timeout
+          message: JSON.stringify({
+            msgType: "heartbeat",
+            agentId: this.config.agentId,
+            timestamp: Date.now(),
+          }),
+        },
+        () => {
+          console.log(`[Server1] Heartbeat timeout, reconnecting...`);
+          if (this.ws1 && (this.ws1.readyState === WebSocket.OPEN || this.ws1.readyState === WebSocket.CONNECTING)) {
+            this.ws1.close();
+          }
+        },
+        "server1",
+        console.log,
+        console.error,
+        () => {
+          // ✅ Heartbeat success callback - report health to OpenClaw
+          this.emit("heartbeat", "server1");
+        }
+      );
 
       this.setupWebSocketHandlers(this.ws1, 'server1');
 
@@ -256,8 +292,9 @@ export class XiaoYiWebSocketManager extends EventEmitter {
       // Send init message
       this.sendInitMessage(this.ws1, 'server1');
 
-      // Start protocol heartbeat
-      this.startProtocolHeartbeat('server1');
+      // ✅ Start heartbeat (replaces old startProtocolHeartbeat)
+      this.heartbeat1.start();
+      console.log(`[Server1] Heartbeat started (30s interval, 10s timeout)`);
 
     } catch (error) {
       console.error(`[Server1] Connection failed:`, error);
@@ -275,9 +312,13 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     console.log(`[Server2] Connecting to ${this.config.wsUrl2}...`);
 
     try {
-      // ✅ Close existing connection before creating new one to prevent ghost connections
+      // ✅ Close existing connection and heartbeat before creating new one
       if (this.ws2) {
         console.log(`[Server2] Closing existing connection before reconnect`);
+        if (this.heartbeat2) {
+          this.heartbeat2.stop();
+          this.heartbeat2 = undefined;
+        }
         try {
           this.ws2.removeAllListeners();
           this.ws2.close();
@@ -299,6 +340,33 @@ export class XiaoYiWebSocketManager extends EventEmitter {
         headers: authHeaders,
         rejectUnauthorized: !skipCertVerify,
       });
+
+      // ✅ Initialize HeartbeatManager for server2
+      this.heartbeat2 = new HeartbeatManager(
+        this.ws2,
+        {
+          interval: 30000, // 30 seconds
+          timeout: 10000,  // 10 seconds timeout
+          message: JSON.stringify({
+            msgType: "heartbeat",
+            agentId: this.config.agentId,
+            timestamp: Date.now(),
+          }),
+        },
+        () => {
+          console.log(`[Server2] Heartbeat timeout, reconnecting...`);
+          if (this.ws2 && (this.ws2.readyState === WebSocket.OPEN || this.ws2.readyState === WebSocket.CONNECTING)) {
+            this.ws2.close();
+          }
+        },
+        "server2",
+        console.log,
+        console.error,
+        () => {
+          // ✅ Heartbeat success callback - report health to OpenClaw
+          this.emit("heartbeat", "server2");
+        }
+      );
 
       this.setupWebSocketHandlers(this.ws2, 'server2');
 
@@ -328,8 +396,9 @@ export class XiaoYiWebSocketManager extends EventEmitter {
       // Send init message
       this.sendInitMessage(this.ws2, 'server2');
 
-      // Start protocol heartbeat
-      this.startProtocolHeartbeat('server2');
+      // ✅ Start heartbeat (replaces old startProtocolHeartbeat)
+      this.heartbeat2.start();
+      console.log(`[Server2] Heartbeat started (30s interval, 10s timeout)`);
 
     } catch (error) {
       console.error(`[Server2] Connection failed:`, error);
@@ -347,6 +416,19 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     console.log("[WS Manager] Disconnecting from all servers...");
 
     this.clearTimers();
+
+    // ✅ Stop heartbeat managers
+    if (this.heartbeat1) {
+      console.log("[Server1] Stopping heartbeat manager");
+      this.heartbeat1.stop();
+      this.heartbeat1 = undefined;
+    }
+
+    if (this.heartbeat2) {
+      console.log("[Server2] Stopping heartbeat manager");
+      this.heartbeat2.stop();
+      this.heartbeat2 = undefined;
+    }
 
     // ✅ Properly cleanup WebSocket connections to prevent ghost connections
     if (this.ws1) {

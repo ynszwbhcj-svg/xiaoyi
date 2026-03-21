@@ -155,10 +155,6 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
     const cleanup = () => {
       log("XY gateway: cleaning up...");
 
-      // // 🔍 Diagnose before cleanup
-      // console.log("🔍 [DIAGNOSTICS] Checking WebSocket managers before cleanup...");
-      // diagnoseAllManagers();
-
       // Stop health check interval
       if (healthCheckInterval) {
         clearInterval(healthCheckInterval);
@@ -172,20 +168,13 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
       wsManager.off("disconnected", disconnectedHandler);
       wsManager.off("error", errorHandler);
 
-      // ✅ Disconnect the wsManager to prevent connection leaks
-      // This is safe because each gateway lifecycle should have clean connections
-      wsManager.disconnect();
-
-      // ✅ Remove manager from cache to prevent reusing dirty state
+      // ✅ Remove manager from cache - this will also disconnect
+      // removeXYWebSocketManager internally calls manager.disconnect()
       removeXYWebSocketManager(account);
 
       loggedServers.clear();
       activeMessages.clear();
       log(`[MONITOR-HANDLER] 🧹 Cleanup complete, cleared active messages`);
-
-      // // 🔍 Diagnose after cleanup
-      // console.log("🔍 [DIAGNOSTICS] Checking WebSocket managers after cleanup...");
-      // diagnoseAllManagers();
     };
 
     const handleAbort = () => {
