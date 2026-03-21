@@ -203,6 +203,18 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     console.log(`[Server1] Connecting to ${this.config.wsUrl1}...`);
 
     try {
+      // ✅ Close existing connection before creating new one to prevent ghost connections
+      if (this.ws1) {
+        console.log(`[Server1] Closing existing connection before reconnect`);
+        try {
+          this.ws1.removeAllListeners();
+          this.ws1.close();
+        } catch (err) {
+          console.warn(`[Server1] Error closing old connection:`, err);
+        }
+        this.ws1 = null;
+      }
+
       const authHeaders = this.auth.generateAuthHeaders();
 
       // Check if URL is wss + IP format, skip certificate verification
@@ -263,6 +275,18 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     console.log(`[Server2] Connecting to ${this.config.wsUrl2}...`);
 
     try {
+      // ✅ Close existing connection before creating new one to prevent ghost connections
+      if (this.ws2) {
+        console.log(`[Server2] Closing existing connection before reconnect`);
+        try {
+          this.ws2.removeAllListeners();
+          this.ws2.close();
+        } catch (err) {
+          console.warn(`[Server2] Error closing old connection:`, err);
+        }
+        this.ws2 = null;
+      }
+
       const authHeaders = this.auth.generateAuthHeaders();
 
       // Check if URL is wss + IP format, skip certificate verification
@@ -324,13 +348,30 @@ export class XiaoYiWebSocketManager extends EventEmitter {
 
     this.clearTimers();
 
+    // ✅ Properly cleanup WebSocket connections to prevent ghost connections
     if (this.ws1) {
-      this.ws1.close();
+      try {
+        console.log("[Server1] Removing all listeners and closing connection");
+        this.ws1.removeAllListeners();
+        if (this.ws1.readyState === WebSocket.OPEN || this.ws1.readyState === WebSocket.CONNECTING) {
+          this.ws1.close();
+        }
+      } catch (err) {
+        console.warn("[Server1] Error during disconnect:", err);
+      }
       this.ws1 = null;
     }
 
     if (this.ws2) {
-      this.ws2.close();
+      try {
+        console.log("[Server2] Removing all listeners and closing connection");
+        this.ws2.removeAllListeners();
+        if (this.ws2.readyState === WebSocket.OPEN || this.ws2.readyState === WebSocket.CONNECTING) {
+          this.ws2.close();
+        }
+      } catch (err) {
+        console.warn("[Server2] Error during disconnect:", err);
+      }
       this.ws2 = null;
     }
 
@@ -350,6 +391,7 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     this.sessionCleanupStateMap.clear();
 
     this.emit("disconnected");
+    console.log("[WS Manager] Disconnect complete");
   }
 
   /**
