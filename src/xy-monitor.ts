@@ -68,10 +68,11 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
   // Get WebSocket manager (cached)
   const wsManager = getXYWebSocketManager(account);
 
-  // // ✅ Set health event callback for heartbeat reporting
-  // if (trackEvent) {
-  //   wsManager.setHealthEventCallback(trackEvent);
-  // }
+  // ✅ Set health event callback for heartbeat reporting
+  // This ensures OpenClaw's health-monitor sees activity and doesn't trigger stale-socket restarts
+  if (trackEvent) {
+    wsManager.setHealthEventCallback(trackEvent);
+  }
 
   // Track logged servers to avoid duplicate logs
   const loggedServers = new Set<string>();

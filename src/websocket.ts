@@ -78,6 +78,10 @@ export class XiaoYiWebSocketManager extends EventEmitter {
   // ==================== Active Tasks ====================
   private activeTasks: Map<string, any> = new Map();
 
+  // ==================== OpenClaw Health Event Callback ====================
+  // Callback to report health events (e.g., heartbeat) to OpenClaw framework
+  private onHealthEvent?: () => void;
+
   constructor(config: XiaoYiChannelConfig) {
     super();
 
@@ -88,6 +92,15 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     console.log(`[WS Manager] Initialized with dual server:`);
     console.log(`  Server 1: ${this.config.wsUrl1}`);
     console.log(`  Server 2: ${this.config.wsUrl2}`);
+  }
+
+  /**
+   * Set health event callback to report activity to OpenClaw framework.
+   * This callback is invoked on heartbeat success to update lastEventAt.
+   */
+  setHealthEventCallback(callback: () => void): void {
+    this.onHealthEvent = callback;
+    console.log("[WS Manager] Health event callback registered");
   }
 
   /**
@@ -261,6 +274,8 @@ export class XiaoYiWebSocketManager extends EventEmitter {
         () => {
           // ✅ Heartbeat success callback - report health to OpenClaw
           this.emit("heartbeat", "server1");
+          // ✅ Report liveness to OpenClaw framework to prevent stale-socket detection
+          this.onHealthEvent?.();
         }
       );
 
@@ -365,6 +380,8 @@ export class XiaoYiWebSocketManager extends EventEmitter {
         () => {
           // ✅ Heartbeat success callback - report health to OpenClaw
           this.emit("heartbeat", "server2");
+          // ✅ Report liveness to OpenClaw framework to prevent stale-socket detection
+          this.onHealthEvent?.();
         }
       );
 
