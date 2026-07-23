@@ -39,3 +39,4 @@ nul
 # Test coverage
 coverage/
 .nyc_output/
+*.tgz
