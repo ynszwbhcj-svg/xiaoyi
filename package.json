@@ -18,7 +18,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc && node fix-imports.cjs",
+    "build": "tsc",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build"
   },
@@ -32,7 +32,7 @@
   "license": "MIT",
   "openclaw": {
     "extensions": [
-      "xiaoyi.js"
+      "./dist/index.js"
     ],
     "channels": [
       "xiaoyi"
@@ -57,7 +57,7 @@
     }
   },
   "peerDependencies": {
-    "openclaw": ">=2026.3.1"
+    "openclaw": ">=2026.6.6"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -68,6 +68,7 @@
     "node-fetch": "^3.3.2",
     "uuid": "^13.0.0",
     "ws": "^8.16.0",
+    "openclaw": "2026.6.6",
     "zod": "^3.22.4"
   },
   "devDependencies": {
@@ -75,6 +76,6 @@
     "@types/node-fetch": "^2.6.13",
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.5.10",
-    "typescript": "^5.3.3"
+    "typescript": "^5.9.2"
   }
 }

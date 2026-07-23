@@ -1,9 +1,7 @@
-// Reply dispatcher - completely following feishu/reply-dispatcher.ts pattern
-import type { OpenClawConfig, RuntimeEnv, ReplyPayload } from "openclaw/dist/plugin-sdk/index.js";
-import { getXiaoYiRuntime } from "./runtime.js";
+// Reply dispatcher - adapted for openclaw 6.6 with streaming improvements
+import type { ClawdbotConfig, RuntimeEnv, ReplyPayload } from "openclaw/plugin-sdk";
+import { getXYRuntime } from "./runtime.js";
 
-// Type alias for backward compatibility
-type ClawdbotConfig = OpenClawConfig;
 import { sendA2AResponse, sendStatusUpdate, sendReasoningTextUpdate } from "./xy-formatter.js";
 import { resolveXYConfig } from "./xy-config.js";
 import type { XiaoYiChannelConfig } from "./types.js";
@@ -19,52 +17,44 @@ export interface CreateXYReplyDispatcherParams {
 
 /**
  * Create a reply dispatcher for XY channel messages.
- * Follows feishu pattern with status updates and streaming support.
- * Runtime is expected to be validated before calling this function.
+ * Ported streaming improvements from xy_channel for openclaw 6.6:
+ * - processingLock: serialized promise chain to prevent concurrent WebSocket sends
+ * - Model-call boundary detection via prevModelText/currentModelText
+ * - finalReplyText capture from deliver(kind: "final") for authoritative final frame
  */
 export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): any {
   const { cfg, runtime, sessionId, taskId, messageId, accountId } = params;
   const log = runtime?.log ?? console.log;
   const error = runtime?.error ?? console.error;
 
-  log(`[DISPATCHER-CREATE] ******* Creating dispatcher for session=${sessionId}, taskId=${taskId}, messageId=${messageId} *******`);
-  log(`[DISPATCHER-CREATE] Stack trace:`, new Error().stack?.split('\n').slice(1, 4).join('\n'));
+  log(`[DISPATCHER-CREATE] Creating dispatcher for session=${sessionId}, taskId=${taskId}`);
 
-  log(`[DISPATCHER-CREATE] ======== Creating reply dispatcher ========`);
-  log(`[DISPATCHER-CREATE] sessionId: ${sessionId}, taskId: ${taskId}, messageId: ${messageId}`);
-  log(`[DISPATCHER-CREATE] Stack trace:`, new Error().stack?.split('\n').slice(1, 4).join('\n'));
-
-  // Get OpenClaw PluginRuntime (not XiaoYiRuntime)
-  const xiaoYiRuntime = getXiaoYiRuntime();
-  const core = xiaoYiRuntime.getPluginRuntime() as any;
+  // Get OpenClaw PluginRuntime via runtime store (openclaw 6.6 pattern)
+  const core = getXYRuntime() as any;
 
   // Resolve configuration
   const config: XiaoYiChannelConfig = resolveXYConfig(cfg);
 
-  // Reply prefix context: not imported at runtime to avoid openclaw/plugin-sdk
-  // module resolution issues in the CJS require chain. For a bot-to-bot A2A
-  // channel the response prefix (model name badge) is not needed.
+  // Reply prefix context: not needed for bot-to-bot A2A channel
   const prefixContext = { responsePrefix: undefined, responsePrefixContextProvider: undefined, onModelSelected: undefined };
 
-  // Status update interval (every 60 seconds)
+  // Status update interval (every 30 seconds)
   let statusUpdateInterval: NodeJS.Timeout | null = null;
 
-  // Track if we've sent any response
+  // Track state
   let hasSentResponse = false;
-  // Track if we've sent the final empty message
   let finalSent = false;
-  // Accumulate all text from deliver calls
   let accumulatedText = "";
 
-  /**
-   * Start the status update interval
-   * Call this immediately after creating the dispatcher
-   */
-  const startStatusInterval = () => {
-    log(`[STATUS INTERVAL] Starting interval for session ${sessionId}, taskId=${taskId}`);
+  // Streaming state (ported from xy_channel)
+  let processingLock: Promise<void> = Promise.resolve();
+  let finalReplyText = "";
+  let prevModelText = "";
+  let currentModelText = "";
 
+  const startStatusInterval = () => {
+    log(`[STATUS INTERVAL] Starting interval for session ${sessionId}`);
     statusUpdateInterval = setInterval(() => {
-      log(`[STATUS INTERVAL] Triggering status update for session ${sessionId}, taskId=${taskId}`);
       void sendStatusUpdate({
         config,
         sessionId,
@@ -75,18 +65,13 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
       }).catch((err) => {
         error(`Failed to send status update:`, err);
       });
-    }, 30000); // 30 seconds
+    }, 30000);
   };
 
-  /**
-   * Stop the status update interval
-   */
   const stopStatusInterval = () => {
     if (statusUpdateInterval) {
-      log(`[STATUS INTERVAL] Stopping interval for session ${sessionId}, taskId=${taskId}`);
       clearInterval(statusUpdateInterval);
       statusUpdateInterval = null;
-      log(`[STATUS INTERVAL] Stopped interval for session ${sessionId}, taskId=${taskId}`);
     }
   };
 
@@ -97,55 +82,41 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
       humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, accountId),
 
       onReplyStart: () => {
-        log(`[REPLY START] Reply started for session ${sessionId}, taskId=${taskId}`);
-        // Status update interval is now managed externally
+        log(`[REPLY START] Reply started for session ${sessionId}`);
       },
 
       deliver: async (payload: ReplyPayload, info) => {
         const text = payload.text ?? "";
 
-        // 🔍 Debug logging
-        log(`[DELIVER] sessionId=${sessionId}, info.kind=${info?.kind}, text.length=${text.length}, text="${text.slice(0, 200)}"`);
-        log(`[DELIVER] payload keys: ${Object.keys(payload).join(", ")}`);
-        if (payload.mediaUrls) {
-          log(`[DELIVER] mediaUrls: ${payload.mediaUrls.length} files`);
-        }
+        log(`[DELIVER] sessionId=${sessionId}, info.kind=${info?.kind}, text.length=${text.length}`);
 
         try {
+          // Capture canonical final text
+          if (info?.kind === "final") {
+            finalReplyText = text;
+            log(`[DELIVER] Captured final reply text, length=${finalReplyText.length}`);
+          }
+
           // Skip empty messages
           if (!text.trim()) {
-            log(`[DELIVER SKIP] Empty text, skipping`);
             return;
           }
 
-          // Accumulate text instead of sending immediately
+          // onPartialReply handles streaming; deliver just accumulates for fallback
           accumulatedText += text;
           hasSentResponse = true;
           log(`[DELIVER ACCUMULATE] Accumulated text, current length=${accumulatedText.length}`);
-
-          // Also stream text as reasoningText for real-time display
-          await sendReasoningTextUpdate({
-            config,
-            sessionId,
-            taskId,
-            messageId,
-            text,
-          });
-          log(`[DELIVER] ✅ Sent deliver text as reasoningText update`);
         } catch (deliverError) {
           error(`Failed to deliver message:`, deliverError);
         }
       },
 
       onError: async (err, info) => {
-        runtime.error?.(`xy: ${info.kind} reply failed: ${String(err)}`);
+        try {
+          runtime.error?.(`xy: ${info.kind} reply failed: ${String(err)}`);
+          stopStatusInterval();
 
-        // Stop status updates
-        stopStatusInterval();
-
-        // Send error status if we haven't sent any response yet
-        if (!hasSentResponse) {
-          try {
+          if (!hasSentResponse) {
             await sendStatusUpdate({
               config,
               sessionId,
@@ -154,20 +125,34 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
               text: "处理失败，请稍后重试",
               state: "failed",
             });
-          } catch (statusError) {
-            error(`Failed to send error status:`, statusError);
           }
+        } catch (statusError) {
+          error(`Failed to send error status:`, statusError);
         }
       },
 
       onIdle: async () => {
         log(`[ON_IDLE] Reply idle for session ${sessionId}, hasSentResponse=${hasSentResponse}, finalSent=${finalSent}`);
 
-        // Send accumulated text with append=false and final=true
-        if (hasSentResponse && !finalSent) {
-          log(`[ON_IDLE] Sending accumulated text, length=${accumulatedText.length}`);
-          try {
-            // Send status update before final message
+        try {
+          if (hasSentResponse && !finalSent) {
+            // Wait for in-flight onPartialReply to complete
+            await processingLock;
+
+            // Resolve final text: prefer canonical finalReplyText from deliver(kind: "final")
+            let resolvedLastModelText = currentModelText;
+            if (finalReplyText) {
+              resolvedLastModelText = finalReplyText;
+            }
+
+            const sep = prevModelText ? "\n" : "";
+            const fullFinalText = prevModelText + sep + resolvedLastModelText;
+
+            // Reset for next turn
+            prevModelText = "";
+            currentModelText = "";
+
+            // Send completion status
             await sendStatusUpdate({
               config,
               sessionId,
@@ -176,27 +161,33 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
               text: "任务处理已完成~",
               state: "completed",
             });
-            log(`[ON_IDLE] ✅ Sent completion status update`);
 
-            await sendA2AResponse({
-              config,
-              sessionId,
-              taskId,
-              messageId,
-              text: accumulatedText,
-              append: false,
-              final: true,
-            });
+            // Send final response
+            if (fullFinalText) {
+              await sendA2AResponse({
+                config,
+                sessionId,
+                taskId,
+                messageId,
+                text: fullFinalText,
+                append: false,
+                final: true,
+              });
+            } else {
+              await sendA2AResponse({
+                config,
+                sessionId,
+                taskId,
+                messageId,
+                text: "",
+                append: true,
+                final: true,
+              });
+            }
             finalSent = true;
-            log(`[ON_IDLE] Sent accumulated text`);
-          } catch (err) {
-            error(`[ON_IDLE] Failed to send accumulated text:`, err);
-          }
-        } else {
-          log(`[ON_IDLE] Skipping final message: hasSentResponse=${hasSentResponse}, finalSent=${finalSent}`);
-
-          // Task was interrupted - send failure status and error response
-          try {
+            log(`[ON_IDLE] Sent final response`);
+          } else {
+            log(`[ON_IDLE] No response sent, sending failure`);
             await sendStatusUpdate({
               config,
               sessionId,
@@ -205,8 +196,6 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
               text: "任务处理中断了~",
               state: "failed",
             });
-            log(`[ON_IDLE] ✅ Sent failure status update`);
-
             await sendA2AResponse({
               config,
               sessionId,
@@ -217,18 +206,16 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
               final: true,
             });
             finalSent = true;
-            log(`[ON_IDLE] ✅ Sent error response`);
-          } catch (err) {
-            error(`[ON_IDLE] Failed to send failure status and error response:`, err);
           }
+        } catch (err) {
+          error(`[ON_IDLE] Failed to send final response:`, err);
+        } finally {
+          stopStatusInterval();
         }
-
-        // Stop status updates
-        stopStatusInterval();
       },
 
       onCleanup: () => {
-        log(`[ON_CLEANUP] Reply cleanup for session ${sessionId}, hasSentResponse=${hasSentResponse}, finalSent=${finalSent}`);
+        log(`[ON_CLEANUP] Reply cleanup for session ${sessionId}`);
       },
     });
 
@@ -236,12 +223,12 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
     dispatcher,
     replyOptions: {
       ...replyOptions,
+      suppressTyping: true,
+      suppressToolErrorWarnings: true,
       onModelSelected: prefixContext.onModelSelected,
 
-      // 🔧 Tool execution start callback
+      // Tool execution start callback
       onToolStart: async ({ name, phase }) => {
-        log(`[TOOL START] 🔧 Tool execution started/updated: name=${name}, phase=${phase}, session=${sessionId}, taskId=${taskId}`);
-
         if (phase === "start") {
           const toolName = name || "unknown";
           try {
@@ -253,30 +240,20 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
               text: `正在使用工具: ${toolName}...`,
               state: "working",
             });
-            log(`[TOOL START] ✅ Sent status update for tool start: ${toolName}`);
           } catch (err) {
-            error(`[TOOL START] ❌ Failed to send tool start status:`, err);
+            error(`[TOOL START] Failed to send tool start status:`, err);
           }
         }
       },
 
-      // 🔧 Tool execution result callback
+      // Tool execution result callback
       onToolResult: async (payload: ReplyPayload) => {
         const text = payload.text ?? "";
         const hasMedia = Boolean(payload.mediaUrl || (payload.mediaUrls?.length ?? 0) > 0);
 
-        log(`[TOOL RESULT] 🔧 Tool execution result received: session=${sessionId}, taskId=${taskId}`);
-        log(`[TOOL RESULT]   - text.length=${text.length}`);
-        log(`[TOOL RESULT]   - hasMedia=${hasMedia}`);
-        log(`[TOOL RESULT]   - isError=${payload.isError}`);
-        if (text.length > 0) {
-          log(`[TOOL RESULT]   - text preview: "${text.slice(0, 200)}"`);
-        }
-
         try {
           if (text.length > 0 || hasMedia) {
             const resultText = text.length > 0 ? text : "工具执行完成";
-
             await sendStatusUpdate({
               config,
               sessionId,
@@ -285,70 +262,72 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
               text: resultText,
               state: "working",
             });
-            log(`[TOOL RESULT] ✅ Sent tool result as status update`);
           }
         } catch (err) {
-          error(`[TOOL RESULT] ❌ Failed to send tool result status:`, err);
+          error(`[TOOL RESULT] Failed to send tool result status:`, err);
         }
       },
 
-      // 🧠 Reasoning/thinking process streaming callback
+      // Reasoning/thinking process streaming callback
       onReasoningStream: async (payload: ReplyPayload) => {
         const text = payload.text ?? "";
-
-        log(`[REASONING STREAM] 🧠 Reasoning/thinking chunk received: session=${sessionId}, taskId=${taskId}`);
-        log(`[REASONING STREAM]   - text.length=${text.length}`);
-        if (text.length > 0) {
-          log(`[REASONING STREAM]   - text preview: "${text.slice(0, 200)}"`);
-        }
-
-        // try {
-        //   if (text.length > 0) {
-        //     await sendReasoningTextUpdate({
-        //       config,
-        //       sessionId,
-        //       taskId,
-        //       messageId,
-        //       text,
-        //     });
-        //     log(`[REASONING STREAM] ✅ Sent reasoning chunk as reasoningText update`);
+        // Reasoning stream is received but not forwarded to A2A client
+        // (uncomment below to enable reasoning text streaming)
+        // if (text.length > 0) {
+        //   try {
+        //     await sendReasoningTextUpdate({ config, sessionId, taskId, messageId, text });
+        //   } catch (err) {
+        //     error(`[REASONING STREAM] Failed to send:`, err);
         //   }
-        // } catch (err) {
-        //   error(`[REASONING STREAM] ❌ Failed to send reasoning chunk reasoningText:`, err);
         // }
       },
 
-      // 📝 Partial reply streaming callback (real-time preview)
+      // Partial reply streaming callback (real-time text streaming)
       onPartialReply: async (payload: ReplyPayload) => {
         const text = payload.text ?? "";
-        const hasMedia = Boolean(payload.mediaUrl || (payload.mediaUrls?.length ?? 0) > 0);
+        if (text.length === 0) return;
 
-        log(`[PARTIAL REPLY] 📝 Partial reply chunk received: session=${sessionId}, taskId=${taskId}`);
-        log(`[PARTIAL REPLY]   - text.length=${text.length}`);
-        log(`[PARTIAL REPLY]   - hasMedia=${hasMedia}`);
-        if (text.length > 0) {
-          log(`[PARTIAL REPLY]   - text preview: "${text.slice(0, 200)}"`);
-        }
+        hasSentResponse = true;
+
+        // Serialized promise chain to prevent concurrent sends
+        const prevLock = processingLock;
+        let releaseLock: () => void;
+        processingLock = new Promise<void>((resolve) => {
+          releaseLock = resolve;
+        });
 
         try {
-          if (text.length > 0) {
-            await sendReasoningTextUpdate({
-              config,
-              sessionId,
-              taskId,
-              messageId,
-              text,
-              append: false,
-            });
-            log(`[PARTIAL REPLY] ✅ Sent partial reply as reasoningText update (append=false)`);
+          await prevLock;
+
+          // Model-call boundary detection: if current text doesn't begin
+          // with what we accumulated for the current model call, we've
+          // crossed a model-call boundary.
+          if (currentModelText && !text.startsWith(currentModelText)) {
+            prevModelText += (prevModelText ? "\n" : "") + currentModelText;
           }
+          currentModelText = text;
+
+          const sep = prevModelText ? "\n" : "";
+          const fullText = prevModelText + sep + text;
+
+          await sendA2AResponse({
+            config,
+            sessionId,
+            taskId,
+            messageId,
+            text: fullText,
+            append: false,
+            final: false,
+          });
         } catch (err) {
-          error(`[PARTIAL REPLY] ❌ Failed to send partial reply reasoningText:`, err);
+          error(`[PARTIAL-REPLY] Failed to send:`, err);
+        } finally {
+          releaseLock!();
         }
       },
     },
     markDispatchIdle,
-    startStatusInterval,  // Expose this to be called immediately
-    stopStatusInterval,   // Expose this for manual control if needed
+    startStatusInterval,
+    stopStatusInterval,
   };
 }

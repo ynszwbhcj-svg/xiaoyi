@@ -1,6 +1,6 @@
 // Monitor for XY channel WebSocket connections
 // Follows feishu/monitor.account.ts and feishu/monitor.transport.ts pattern
-import type { RuntimeEnv } from "openclaw/dist/plugin-sdk/index.js";
+import type { RuntimeEnv } from "openclaw/plugin-sdk";
 import { resolveXYConfig } from "./xy-config.js";
 import { getXYWebSocketManager, removeXYWebSocketManager } from "./xy-client.js";
 import { handleXYMessage } from "./xy-bot.js";

@@ -1,10 +1,8 @@
 import type {
   ChannelPlugin,
-  ChannelOutboundContext,
-  ChannelGatewayContext,
-  OpenClawConfig,
   ChannelAccountSnapshot,
-} from "openclaw/dist/plugin-sdk/index.js";
+} from "openclaw/plugin-sdk";
+import type { ClawdbotConfig } from "openclaw/plugin-sdk";
 
 // Local type definition for outbound delivery result
 // (matches openclaw's internal OutboundDeliveryResult type)
@@ -71,7 +69,7 @@ export const xiaoyiPlugin = {
   },
 
   capabilities: {
-    chatTypes: ["direct"],
+    chatTypes: ["direct"] as Array<"direct" | "group" | "channel">,
     polls: false,
     reactions: false,
     threads: false,
@@ -143,7 +141,7 @@ export const xiaoyiPlugin = {
    * Config adapter - single account mode
    */
   config: {
-    listAccountIds: (cfg: OpenClawConfig) => {
+    listAccountIds: (cfg: ClawdbotConfig) => {
       const channelConfig = cfg?.channels?.xiaoyi as XiaoYiChannelConfig;
       if (!channelConfig || !channelConfig.enabled) {
         return [];
@@ -152,7 +150,7 @@ export const xiaoyiPlugin = {
       return ["default"];
     },
 
-    resolveAccount: (cfg: OpenClawConfig, accountId?: string | null) => {
+    resolveAccount: (cfg: ClawdbotConfig, accountId?: string | null) => {
       // Single account mode: always use "default"
       const resolvedAccountId = "default";
 
@@ -183,7 +181,7 @@ export const xiaoyiPlugin = {
       };
     },
 
-    defaultAccountId: (cfg: OpenClawConfig) => {
+    defaultAccountId: (cfg: ClawdbotConfig) => {
       const channelConfig = cfg?.channels?.xiaoyi as XiaoYiChannelConfig;
       if (!channelConfig || !channelConfig.enabled) {
         return undefined;
@@ -192,7 +190,7 @@ export const xiaoyiPlugin = {
       return "default";
     },
 
-    isConfigured: (account: any, cfg: OpenClawConfig) => {
+    isConfigured: (account: any, cfg: ClawdbotConfig) => {
       // Safely check if all required fields are present and non-empty
       if (!account || !account.config) {
         return false;
@@ -209,19 +207,19 @@ export const xiaoyiPlugin = {
       return hasAk && hasSk && hasAgentId;
     },
 
-    isEnabled: (account: any, cfg: OpenClawConfig) => {
+    isEnabled: (account: any, cfg: ClawdbotConfig) => {
       return account?.enabled !== false;
     },
 
-    disabledReason: (account: any, cfg: OpenClawConfig) => {
+    disabledReason: (account: any, cfg: ClawdbotConfig) => {
       return "Channel is disabled in configuration";
     },
 
-    unconfiguredReason: (account: any, cfg: OpenClawConfig) => {
+    unconfiguredReason: (account: any, cfg: ClawdbotConfig) => {
       return "Missing required configuration: ak, sk, or agentId (wsUrl1/wsUrl2 are optional, defaults will be used)";
     },
 
-    describeAccount: (account: any, cfg: OpenClawConfig) => ({
+    describeAccount: (account: any, cfg: ClawdbotConfig) => ({
       accountId: account.accountId,
       name: 'XiaoYi',
       enabled: account.enabled,
@@ -236,7 +234,7 @@ export const xiaoyiPlugin = {
    * Using xy-monitor for message handling (xy_channel architecture)
    */
   gateway: {
-    startAccount: async (ctx: ChannelGatewayContext<ResolvedXiaoYiAccount>) => {
+    startAccount: async (ctx: any) => {
       console.log("XiaoYi: startAccount() called - START");
       const { monitorXYProvider } = await import("./xy-monitor.js");
       const account = ctx.account;
@@ -255,7 +253,7 @@ export const xiaoyiPlugin = {
       });
     },
 
-    stopAccount: async (ctx: ChannelGatewayContext<ResolvedXiaoYiAccount>) => {
+    stopAccount: async (ctx: any) => {
       const runtime = getXiaoYiRuntime();
       runtime.stop();
     },
@@ -265,13 +263,13 @@ export const xiaoyiPlugin = {
    * Outbound adapter - send messages via push
    */
   outbound: {
-    deliveryMode: "direct",
+    deliveryMode: "direct" as const,
     textChunkLimit: 4000,
 
     resolveTarget: ({ cfg, to, accountId, mode }: any) => {
       if (!to || to.trim() === "") {
         console.log(`[xiaoyi.resolveTarget] No target specified, using default push marker`);
-        return { ok: true, to: DEFAULT_PUSH_MARKER };
+        return { ok: true as const, to: DEFAULT_PUSH_MARKER };
       }
 
       const trimmedTo = to.trim();
@@ -282,15 +280,15 @@ export const xiaoyiPlugin = {
         if (sessionContext && sessionContext.sessionId === trimmedTo) {
           const enhancedTarget = `${trimmedTo}::${sessionContext.taskId}`;
           console.log(`[xiaoyi.resolveTarget] Enhanced target: ${enhancedTarget}`);
-          return { ok: true, to: enhancedTarget };
+          return { ok: true as const, to: enhancedTarget };
         }
         console.log(`[xiaoyi.resolveTarget] Could not find matching session context for "${trimmedTo}"`);
       }
 
-      return { ok: true, to: trimmedTo };
+      return { ok: true as const, to: trimmedTo };
     },
 
-    sendText: async (ctx: ChannelOutboundContext): Promise<OutboundDeliveryResult> => {
+    sendText: async (ctx: any): Promise<OutboundDeliveryResult> => {
       const { cfg, to, text, accountId } = ctx as any;
 
       console.log(`[xiaoyi.sendText] Called with: to=${to}, textLength=${text?.length || 0}`);
@@ -333,7 +331,7 @@ export const xiaoyiPlugin = {
       };
     },
 
-    sendMedia: async (ctx: ChannelOutboundContext): Promise<OutboundDeliveryResult> => {
+    sendMedia: async (ctx: any): Promise<OutboundDeliveryResult> => {
       throw new Error("暂不支持文件回传");
     },
   },
@@ -358,7 +356,7 @@ export const xiaoyiPlugin = {
   status: {
     buildAccountSnapshot: async (params: {
       account: ResolvedXiaoYiAccount;
-      cfg: OpenClawConfig;
+      cfg: ClawdbotConfig;
       runtime?: any;
       probe?: unknown;
       audit?: unknown;

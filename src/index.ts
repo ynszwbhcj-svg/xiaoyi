@@ -1,6 +1,7 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { definePluginEntry, type OpenClawPluginDefinition } from "openclaw/plugin-sdk/core";
 import { xiaoyiPlugin } from "./channel.js";
-import { setXiaoYiRuntime } from "./runtime.js";
+import { setXYRuntime } from "./runtime.js";
 
 /**
  * XiaoYi Channel Plugin for OpenClaw
@@ -22,25 +23,16 @@ import { setXiaoYiRuntime } from "./runtime.js";
  *   }
  * }
  */
-const plugin = {
+const plugin: OpenClawPluginDefinition = definePluginEntry({
   id: "xiaoyi",
   name: "XiaoYi Channel",
   description: "XiaoYi channel plugin with A2A protocol support",
-  configSchema: undefined,
   register(api: OpenClawPluginApi) {
     console.log("XiaoYi: register() called - START");
 
-    // Set runtime for managing WebSocket connections
-    setXiaoYiRuntime(api.runtime);
-    console.log("XiaoYi: setXiaoYiRuntime() completed");
-
-    // Clean up any existing connections from previous plugin loads
-    const runtime = require("./runtime.js").getXiaoYiRuntime();
-    console.log(`XiaoYi: Got runtime instance: ${runtime.getInstanceId()}, isConnected: ${runtime.isConnected()}`);
-    if (runtime.isConnected()) {
-      console.log("XiaoYi: Cleaning up existing connection from previous load");
-      runtime.stop();
-    }
+    // Store runtime for cross-module access
+    setXYRuntime(api.runtime);
+    console.log("XiaoYi: setXYRuntime() completed");
 
     // Register the channel plugin
     console.log("XiaoYi: About to call registerChannel()");
@@ -49,6 +41,6 @@ const plugin = {
 
     console.log("XiaoYi channel plugin registered - END");
   },
-};
+});
 
 export default plugin;

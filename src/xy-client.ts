@@ -2,7 +2,7 @@
 // Adapted for xiaoyi - uses xiaoyi's WebSocket manager with aksk auth
 import { XiaoYiWebSocketManager } from "./websocket.js";
 import type { XiaoYiChannelConfig } from "./types.js";
-import type { RuntimeEnv } from "openclaw/dist/plugin-sdk/index.js";
+import type { RuntimeEnv } from "openclaw/plugin-sdk";
 
 // Runtime reference for logging
 let runtime: RuntimeEnv | undefined;

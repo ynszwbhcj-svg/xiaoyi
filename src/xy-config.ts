@@ -1,9 +1,6 @@
 // Configuration parsing and validation for XiaoYi channel
-import type { OpenClawConfig } from "openclaw/dist/plugin-sdk/index.js";
+import type { ClawdbotConfig } from "openclaw/plugin-sdk";
 import type { XiaoYiChannelConfig } from "./types.js";
-
-// Type alias for backward compatibility
-type ClawdbotConfig = OpenClawConfig;
 
 /**
  * Resolve XiaoYi channel configuration from OpenClaw config.

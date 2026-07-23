@@ -1,5 +1,16 @@
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
+import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
 import { XiaoYiWebSocketManager } from "./websocket.js";
 import { XiaoYiChannelConfig } from "./types.js";
+
+// New runtime store for cross-module PluginRuntime access (openclaw 6.6 pattern)
+const { setRuntime: setXYRuntime, getRuntime: getXYRuntime } =
+  createPluginRuntimeStore<PluginRuntime>({
+    pluginId: "xiaoyi",
+    errorMessage: "Xiaoyi runtime not initialized. Call setXYRuntime() first.",
+  });
+
+export { getXYRuntime, setXYRuntime };
 
 /**
  * Timeout configuration
@@ -513,4 +524,5 @@ export function getXiaoYiRuntime(): XiaoYiRuntime {
 
 export function setXiaoYiRuntime(runtime: any): void {
   getXiaoYiRuntime().setPluginRuntime(runtime);
+  setXYRuntime(runtime); // Also store in the new runtime store (openclaw 6.6 pattern)
 }

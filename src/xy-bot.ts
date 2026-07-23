@@ -1,9 +1,6 @@
 // Message dispatch engine - following feishu/bot.ts pattern (simplified)
-import type { OpenClawConfig, RuntimeEnv, ReplyPayload } from "openclaw/dist/plugin-sdk/index.js";
-import { getXiaoYiRuntime } from "./runtime.js";
-
-// Type alias for backward compatibility
-type ClawdbotConfig = OpenClawConfig;
+import type { ClawdbotConfig, RuntimeEnv, ReplyPayload } from "openclaw/plugin-sdk";
+import { getXYRuntime } from "./runtime.js";
 import { createXYReplyDispatcher } from "./xy-reply-dispatcher.js";
 import { parseA2AMessage, extractTextFromParts, extractFileParts, extractPushId, isClearContextMessage, isTasksCancelMessage } from "./xy-parser.js";
 import { downloadFilesFromParts } from "./file-download.js";
@@ -33,9 +30,8 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
   const log = runtime?.log ?? console.log;
   const error = runtime?.error ?? console.error;
 
-  // Get OpenClaw PluginRuntime (not XiaoYiRuntime)
-  const xiaoYiRuntime = getXiaoYiRuntime();
-  const core = xiaoYiRuntime.getPluginRuntime() as any;
+  // Get OpenClaw PluginRuntime via new runtime store
+  const core = getXYRuntime() as any;
 
   try {
     // Check for special messages BEFORE parsing (these have different param structures)
@@ -261,8 +257,7 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
 
     // Try to unregister session on error (if route was established)
     try {
-      const xiaoYiRuntime = getXiaoYiRuntime();
-      const core = xiaoYiRuntime.getPluginRuntime() as any;
+      const core = getXYRuntime() as any;
       const params = message.params as any;
       const sessionId = params?.sessionId;
       if (sessionId) {

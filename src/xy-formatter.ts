@@ -2,7 +2,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { getXYWebSocketManager } from "./xy-client.js";
 import { getXiaoYiRuntime } from "./runtime.js";
-import type { RuntimeEnv } from "openclaw/dist/plugin-sdk/index.js";
+import type { RuntimeEnv } from "openclaw/plugin-sdk";
 import type {
   XiaoYiChannelConfig,
   A2AJsonRpcResponse,
