@@ -15,7 +15,6 @@ import { setXYRuntime } from "./runtime.js";
  *     "xiaoyi": {
  *       "enabled": true,
  *       "wsUrl1": "ws://localhost:8765/ws/link",
- *       "wsUrl2": "ws://localhost:8766/ws/link",
  *       "ak": "test_ak",
  *       "sk": "test_sk",
  *       "agentId": "your-agent-id"

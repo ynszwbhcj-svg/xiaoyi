@@ -260,13 +260,12 @@ export interface A2ATasksCancelMessage {
 
 export interface XiaoYiChannelConfig {
   enabled: boolean;
-  wsUrl?: string;  // Deprecated: Use wsUrl1 for backward compatibility
-  wsUrl1?: string; // First WebSocket server URL
-  wsUrl2?: string; // Second WebSocket server URL
+  wsUrl?: string;  // WebSocket server URL (legacy field name)
+  wsUrl1?: string; // WebSocket server URL (preferred)
   ak: string;
   sk: string;
   agentId: string;
-  enableStreaming?: boolean;  // Enable streaming responses (default: false)
+  enableStreaming?: boolean;  // Enable streaming responses (default: true)
 
   // Push notification configuration (optional)
   apiId?: string;          // API ID, for push messages (optional)
@@ -297,14 +296,12 @@ export interface WebSocketConnectionState {
   maxReconnectAttempts: number;
 }
 
-// Dual server configuration
-export const DEFAULT_WS_URL_1 = "wss://hag.cloud.huawei.com/openclaw/v1/ws/link";
-export const DEFAULT_WS_URL_2 = "wss://116.63.174.231/openclaw/v1/ws/link";
+// Default WebSocket server URL
+export const DEFAULT_WS_URL = "wss://hag.cloud.huawei.com/openclaw/v1/ws/link";
 
 // Internal WebSocket configuration (resolved from XiaoYiChannelConfig)
 export interface InternalWebSocketConfig {
-  wsUrl1: string;
-  wsUrl2: string;
+  wsUrl: string;
   agentId: string;
   ak: string;
   sk: string;
@@ -312,11 +309,8 @@ export interface InternalWebSocketConfig {
   sessionCleanupTimeoutMs?: number;
 }
 
-// Server identifier type
-export type ServerId = 'server1' | 'server2';
-
-// Server connection state
-export interface ServerConnectionState {
+// Connection state
+export interface ConnectionState {
   connected: boolean;
   ready: boolean;
   lastHeartbeat: number;
@@ -328,7 +322,6 @@ export interface ServerConnectionState {
  */
 export interface SessionCleanupState {
   sessionId: string;
-  serverId: ServerId;
   markedForCleanupAt: number; // Timestamp when marked for cleanup
   cleanupTimeoutId?: NodeJS.Timeout; // Timeout ID for auto-cleanup
   reason: 'user_cleared' | 'timeout' | 'error';
@@ -338,8 +331,5 @@ export interface SessionCleanupState {
 // Session binding types
 export interface SessionBinding {
   sessionId: string;
-  server: ServerIdentifier;
   boundAt: number;
 }
-
-export type ServerIdentifier = 'server1' | 'server2';

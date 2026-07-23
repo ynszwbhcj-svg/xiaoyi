@@ -112,24 +112,8 @@ export class XiaoYiRuntime {
       console.log("XiaoYi channel authenticated");
     });
 
-    manager.on("maxReconnectAttemptsReached", (serverId: string) => {
-      console.error(`XiaoYi channel ${serverId} max reconnect attempts reached`);
-
-      // Check if the other server is still connected and ready
-      const otherServerId = serverId === 'server1' ? 'server2' : 'server1';
-      const serverStates = manager.getServerStates();
-      const otherServerState = otherServerId === 'server1' ? serverStates.server1 : serverStates.server2;
-
-      if (otherServerState?.connected && otherServerState?.ready) {
-        console.warn(`[${otherServerId}] is still connected and ready, continuing in single-server mode`);
-        console.warn(`System will continue running with ${otherServerId} only`);
-        // Don't stop, continue with the other server
-        return;
-      }
-
-      // Only stop when both servers have failed
-      console.error("Both servers have reached max reconnect attempts, stopping connection");
-      console.error(`Server1: ${serverStates.server1.connected ? 'connected' : 'disconnected'}, Server2: ${serverStates.server2.connected ? 'connected' : 'disconnected'}`);
+    manager.on("maxReconnectAttemptsReached", () => {
+      console.error("XiaoYi channel max reconnect attempts reached, stopping");
       this.stop();
     });
 

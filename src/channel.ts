@@ -92,12 +92,7 @@ export const xiaoyiPlugin = {
         wsUrl1: {
           type: "string",
           default: "wss://hag.cloud.huawei.com/openclaw/v1/ws/link",
-          description: "Primary WebSocket server URL",
-        },
-        wsUrl2: {
-          type: "string",
-          default: "wss://116.63.174.231/openclaw/v1/ws/link",
-          description: "Secondary WebSocket server URL",
+          description: "WebSocket server URL",
         },
         ak: {
           type: "string",
@@ -165,7 +160,6 @@ export const xiaoyiPlugin = {
             enabled: false,
             wsUrl: "",
             wsUrl1: "",
-            wsUrl2: "",
             ak: "",
             sk: "",
             agentId: "",
@@ -199,7 +193,7 @@ export const xiaoyiPlugin = {
       const config = account.config;
 
       // Check each field is a string and has content after trimming
-      // Note: wsUrl1/wsUrl2 are optional (defaults will be used if not provided)
+      // Note: wsUrl1 is optional (default will be used if not provided)
       const hasAk = typeof config.ak === 'string' && config.ak.trim().length > 0;
       const hasSk = typeof config.sk === 'string' && config.sk.trim().length > 0;
       const hasAgentId = typeof config.agentId === 'string' && config.agentId.trim().length > 0;
@@ -216,7 +210,7 @@ export const xiaoyiPlugin = {
     },
 
     unconfiguredReason: (account: any, cfg: ClawdbotConfig) => {
-      return "Missing required configuration: ak, sk, or agentId (wsUrl1/wsUrl2 are optional, defaults will be used)";
+      return "Missing required configuration: ak, sk, or agentId (wsUrl1 is optional, default will be used)";
     },
 
     describeAccount: (account: any, cfg: ClawdbotConfig) => ({

@@ -17,38 +17,24 @@ import {
   WebSocketConnectionState,
   XiaoYiChannelConfig,
   InternalWebSocketConfig,
-  ServerId,
-  ServerConnectionState,
-  DEFAULT_WS_URL_1,
-  DEFAULT_WS_URL_2,
+  ConnectionState,
+  DEFAULT_WS_URL,
   SessionCleanupState,
 } from "./types.js";
 
 export class XiaoYiWebSocketManager extends EventEmitter {
-  // ==================== Dual WebSocket Connections ====================
-  private ws1: WebSocket | null = null;
-  private ws2: WebSocket | null = null;
+  // ==================== Single WebSocket Connection ====================
+  private ws: WebSocket | null = null;
 
-  // ==================== Dual Server States ====================
-  private state1: ServerConnectionState = {
+  // ==================== Connection State ====================
+  private state: ConnectionState = {
     connected: false,
     ready: false,
     lastHeartbeat: 0,
     reconnectAttempts: 0
   };
-
-  private state2: ServerConnectionState = {
-    connected: false,
-    ready: false,
-    lastHeartbeat: 0,
-    reconnectAttempts: 0
-  };
-
-  // ==================== Session → Server Mapping ====================
-  private sessionServerMap = new Map<string, ServerId>();
 
   // ==================== Session Cleanup State ====================
-  // Track sessions that are pending cleanup (user cleared context but task still running)
   private sessionCleanupStateMap = new Map<string, SessionCleanupState>();
   private static readonly DEFAULT_CLEANUP_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour
 
@@ -56,128 +42,69 @@ export class XiaoYiWebSocketManager extends EventEmitter {
   private auth: XiaoYiAuth;
   private config: InternalWebSocketConfig;
 
-  // ==================== Heartbeat Timers ====================
-  private heartbeatTimeout1?: NodeJS.Timeout;
-  private heartbeatTimeout2?: NodeJS.Timeout;
+  // ==================== Heartbeat ====================
+  private heartbeat?: HeartbeatManager;
   private appHeartbeatInterval?: NodeJS.Timeout;
 
-  // ==================== Heartbeat Managers ====================
-  private heartbeat1?: HeartbeatManager;
-  private heartbeat2?: HeartbeatManager;
-
-  // ==================== Reconnect Timers ====================
-  private reconnectTimeout1?: NodeJS.Timeout;
-  private reconnectTimeout2?: NodeJS.Timeout;
-
-  // ==================== Connection Stability Timers ====================
-  // Track stable connections before resetting reconnect counter
-  private stableConnectionTimer1?: NodeJS.Timeout;
-  private stableConnectionTimer2?: NodeJS.Timeout;
+  // ==================== Reconnect ====================
+  private reconnectTimeout?: NodeJS.Timeout;
+  private stableConnectionTimer?: NodeJS.Timeout;
   private static readonly STABLE_CONNECTION_THRESHOLD = 10000; // 10 seconds
 
   // ==================== Active Tasks ====================
   private activeTasks: Map<string, any> = new Map();
 
   // ==================== OpenClaw Health Event Callback ====================
-  // Callback to report health events (e.g., heartbeat) to OpenClaw framework
   private onHealthEvent?: () => void;
 
   constructor(config: XiaoYiChannelConfig) {
     super();
 
-    // Resolve configuration with defaults and backward compatibility
     this.config = this.resolveConfig(config);
     this.auth = new XiaoYiAuth(this.config.ak, this.config.sk, this.config.agentId);
 
-    console.log(`[WS Manager] Initialized with dual server:`);
-    console.log(`  Server 1: ${this.config.wsUrl1}`);
-    console.log(`  Server 2: ${this.config.wsUrl2}`);
+    console.log(`[WS Manager] Initialized: ${this.config.wsUrl}`);
   }
 
-  /**
-   * Set health event callback to report activity to OpenClaw framework.
-   * This callback is invoked on heartbeat success to update lastEventAt.
-   */
   setHealthEventCallback(callback: () => void): void {
     this.onHealthEvent = callback;
-    console.log("[WS Manager] Health event callback registered");
   }
 
-  /**
-   * Check if URL is wss + IP format (skip certificate verification)
-   */
   private isWssWithIp(urlString: string): boolean {
     try {
       const url = new URL(urlString);
-
-      // Check if protocol is wss
-      if (url.protocol !== 'wss:') {
-        return false;
-      }
+      if (url.protocol !== 'wss:') return false;
 
       const hostname = url.hostname;
-
-      // Check for IPv4 address (e.g., 192.168.1.1)
       const ipv4Regex = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
       if (ipv4Regex.test(hostname)) {
-        // Validate each octet is 0-255
-        const octets = hostname.split('.');
-        return octets.every(octet => {
+        return hostname.split('.').every(octet => {
           const num = parseInt(octet, 10);
           return num >= 0 && num <= 255;
         });
       }
 
-      // Check for IPv6 address (e.g., [::1] or 2001:db8::1)
-      // IPv6 in URL might be wrapped in brackets
-      const ipv6Regex = /^[\[::0-9a-fA-F]+$/;
-      const ipv6WithoutBrackets = hostname.replace(/[\[\]]/g, '');
-
-      // Simple check for IPv6: contains colons and valid hex characters
-      if (hostname.includes('[') && hostname.includes(']')) {
-        return ipv6Regex.test(hostname);
-      }
-
-      // Check for plain IPv6 format
+      if (hostname.includes('[') && hostname.includes(']')) return true;
       if (hostname.includes(':')) {
         const ipv6RegexPlain = /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/;
-        return ipv6RegexPlain.test(ipv6WithoutBrackets);
+        return ipv6RegexPlain.test(hostname.replace(/[\[\]]/g, ''));
       }
-
       return false;
-    } catch (error) {
-      console.warn(`[WS Manager] Invalid URL format: ${urlString}`);
+    } catch {
       return false;
     }
   }
 
-  /**
-   * Resolve configuration with defaults and backward compatibility
-   */
   private resolveConfig(userConfig: XiaoYiChannelConfig): InternalWebSocketConfig {
-    // Backward compatibility: if wsUrl is provided but wsUrl1/wsUrl2 are not,
-    // use wsUrl for server1 and default for server2
-    let wsUrl1 = userConfig.wsUrl1;
-    let wsUrl2 = userConfig.wsUrl2;
+    let wsUrl = userConfig.wsUrl1 || userConfig.wsUrl;
 
-    if (!wsUrl1 && userConfig.wsUrl) {
-      wsUrl1 = userConfig.wsUrl;
-    }
-
-    // Apply defaults if not provided
-    if (!wsUrl1) {
-      console.warn(`[WS Manager] wsUrl1 not provided, using default: ${DEFAULT_WS_URL_1}`);
-      wsUrl1 = DEFAULT_WS_URL_1;
-    }
-
-    if (!wsUrl2) {
-      console.warn(`[WS Manager] wsUrl2 not provided, using default: ${DEFAULT_WS_URL_2}`);
-      wsUrl2 = DEFAULT_WS_URL_2;
+    if (!wsUrl) {
+      console.warn(`[WS Manager] wsUrl not provided, using default: ${DEFAULT_WS_URL}`);
+      wsUrl = DEFAULT_WS_URL;
     }
 
     return {
-      wsUrl1,
-      wsUrl2,
+      wsUrl,
       agentId: userConfig.agentId,
       ak: userConfig.ak,
       sk: userConfig.sk,
@@ -186,76 +113,48 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     };
   }
 
-  /**
-   * Connect to both WebSocket servers
-   */
   async connect(): Promise<void> {
-    console.log("[WS Manager] Connecting to both servers...");
-
-    const results = await Promise.allSettled([
-      this.connectToServer1(),
-      this.connectToServer2(),
-    ]);
-
-    // Check if at least one connection succeeded
-    const server1Success = results[0].status === 'fulfilled';
-    const server2Success = results[1].status === 'fulfilled';
-
-    if (!server1Success && !server2Success) {
-      console.error("[WS Manager] Failed to connect to both servers");
-      throw new Error("Failed to connect to both servers");
-    }
-
-    console.log(`[WS Manager] Connection results: Server1=${server1Success}, Server2=${server2Success}`);
-
-    // Start application-level heartbeat (only if at least one connection is ready)
-    if (this.state1.connected || this.state2.connected) {
-      this.startAppHeartbeat();
-    }
+    console.log("[WS Manager] Connecting...");
+    await this.connectWs();
+    this.startAppHeartbeat();
   }
 
-  /**
-   * Connect to server 1
-   */
-  private async connectToServer1(): Promise<void> {
-    console.log(`[Server1] Connecting to ${this.config.wsUrl1}...`);
+  private async connectWs(): Promise<void> {
+    console.log(`[WS] Connecting to ${this.config.wsUrl}...`);
 
     try {
-      // ✅ Close existing connection and heartbeat before creating new one
-      if (this.ws1) {
-        console.log(`[Server1] Closing existing connection before reconnect`);
-        if (this.heartbeat1) {
-          this.heartbeat1.stop();
-          this.heartbeat1 = undefined;
+      if (this.ws) {
+        console.log(`[WS] Closing existing connection before reconnect`);
+        if (this.heartbeat) {
+          this.heartbeat.stop();
+          this.heartbeat = undefined;
         }
         try {
-          this.ws1.removeAllListeners();
-          this.ws1.close();
+          this.ws.removeAllListeners();
+          this.ws.close();
         } catch (err) {
-          console.warn(`[Server1] Error closing old connection:`, err);
+          console.warn(`[WS] Error closing old connection:`, err);
         }
-        this.ws1 = null;
+        this.ws = null;
       }
 
       const authHeaders = this.auth.generateAuthHeaders();
 
-      // Check if URL is wss + IP format, skip certificate verification
-      const skipCertVerify = this.isWssWithIp(this.config.wsUrl1);
+      const skipCertVerify = this.isWssWithIp(this.config.wsUrl);
       if (skipCertVerify) {
-        console.log(`[Server1] WSS + IP detected, skipping certificate verification`);
+        console.log(`[WS] WSS + IP detected, skipping certificate verification`);
       }
 
-      this.ws1 = new WebSocket(this.config.wsUrl1, {
+      this.ws = new WebSocket(this.config.wsUrl, {
         headers: authHeaders,
         rejectUnauthorized: !skipCertVerify,
       });
 
-      // ✅ Initialize HeartbeatManager for server1
-      this.heartbeat1 = new HeartbeatManager(
-        this.ws1,
+      this.heartbeat = new HeartbeatManager(
+        this.ws,
         {
-          interval: 30000, // 30 seconds
-          timeout: 10000,  // 10 seconds timeout
+          interval: 30000,
+          timeout: 10000,
           message: JSON.stringify({
             msgType: "heartbeat",
             agentId: this.config.agentId,
@@ -263,229 +162,75 @@ export class XiaoYiWebSocketManager extends EventEmitter {
           }),
         },
         () => {
-          console.log(`[Server1] Heartbeat timeout, reconnecting...`);
-          if (this.ws1 && (this.ws1.readyState === WebSocket.OPEN || this.ws1.readyState === WebSocket.CONNECTING)) {
-            this.ws1.close();
+          console.log(`[WS] Heartbeat timeout, reconnecting...`);
+          if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+            this.ws.close();
           }
         },
-        "server1",
+        "ws",
         console.log,
         console.error,
         () => {
-          // ✅ Heartbeat success callback - report health to OpenClaw
-          this.emit("heartbeat", "server1");
-          // ✅ Report liveness to OpenClaw framework to prevent stale-socket detection
+          this.emit("heartbeat");
           this.onHealthEvent?.();
         }
       );
 
-      this.setupWebSocketHandlers(this.ws1, 'server1');
+      this.setupWebSocketHandlers(this.ws);
 
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error("Connection timeout")), 30000);
-
-        this.ws1!.once("open", () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-
-        this.ws1!.once("error", (error) => {
-          clearTimeout(timeout);
-          reject(error);
-        });
+        this.ws!.once("open", () => { clearTimeout(timeout); resolve(); });
+        this.ws!.once("error", (error) => { clearTimeout(timeout); reject(error); });
       });
 
-      this.state1.connected = true;
-      this.state1.ready = true;
+      this.state.connected = true;
+      this.state.ready = true;
 
-      console.log(`[Server1] Connected successfully`);
-      this.emit("connected", "server1");
+      console.log(`[WS] Connected successfully`);
+      this.emit("connected");
 
-      // Schedule connection stability check before resetting reconnect counter
-      this.scheduleStableConnectionCheck('server1');
-
-      // Send init message
-      this.sendInitMessage(this.ws1, 'server1');
-
-      // ✅ Start heartbeat (replaces old startProtocolHeartbeat)
-      this.heartbeat1.start();
-      console.log(`[Server1] Heartbeat started (30s interval, 10s timeout)`);
+      this.scheduleStableConnectionCheck();
+      this.sendInitMessage(this.ws);
+      this.heartbeat.start();
+      console.log(`[WS] Heartbeat started (30s interval, 10s timeout)`);
 
     } catch (error) {
-      console.error(`[Server1] Connection failed:`, error);
-      this.state1.connected = false;
-      this.state1.ready = false;
-      this.emit("error", { serverId: 'server1', error });
+      console.error(`[WS] Connection failed:`, error);
+      this.state.connected = false;
+      this.state.ready = false;
+      this.emit("error", { error });
       throw error;
     }
   }
 
-  /**
-   * Connect to server 2
-   */
-  private async connectToServer2(): Promise<void> {
-    console.log(`[Server2] Connecting to ${this.config.wsUrl2}...`);
-
-    try {
-      // ✅ Close existing connection and heartbeat before creating new one
-      if (this.ws2) {
-        console.log(`[Server2] Closing existing connection before reconnect`);
-        if (this.heartbeat2) {
-          this.heartbeat2.stop();
-          this.heartbeat2 = undefined;
-        }
-        try {
-          this.ws2.removeAllListeners();
-          this.ws2.close();
-        } catch (err) {
-          console.warn(`[Server2] Error closing old connection:`, err);
-        }
-        this.ws2 = null;
-      }
-
-      const authHeaders = this.auth.generateAuthHeaders();
-
-      // Check if URL is wss + IP format, skip certificate verification
-      const skipCertVerify = this.isWssWithIp(this.config.wsUrl2);
-      if (skipCertVerify) {
-        console.log(`[Server2] WSS + IP detected, skipping certificate verification`);
-      }
-
-      this.ws2 = new WebSocket(this.config.wsUrl2, {
-        headers: authHeaders,
-        rejectUnauthorized: !skipCertVerify,
-      });
-
-      // ✅ Initialize HeartbeatManager for server2
-      this.heartbeat2 = new HeartbeatManager(
-        this.ws2,
-        {
-          interval: 30000, // 30 seconds
-          timeout: 10000,  // 10 seconds timeout
-          message: JSON.stringify({
-            msgType: "heartbeat",
-            agentId: this.config.agentId,
-            timestamp: Date.now(),
-          }),
-        },
-        () => {
-          console.log(`[Server2] Heartbeat timeout, reconnecting...`);
-          if (this.ws2 && (this.ws2.readyState === WebSocket.OPEN || this.ws2.readyState === WebSocket.CONNECTING)) {
-            this.ws2.close();
-          }
-        },
-        "server2",
-        console.log,
-        console.error,
-        () => {
-          // ✅ Heartbeat success callback - report health to OpenClaw
-          this.emit("heartbeat", "server2");
-          // ✅ Report liveness to OpenClaw framework to prevent stale-socket detection
-          this.onHealthEvent?.();
-        }
-      );
-
-      this.setupWebSocketHandlers(this.ws2, 'server2');
-
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("Connection timeout")), 30000);
-
-        this.ws2!.once("open", () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-
-        this.ws2!.once("error", (error) => {
-          clearTimeout(timeout);
-          reject(error);
-        });
-      });
-
-      this.state2.connected = true;
-      this.state2.ready = true;
-
-      console.log(`[Server2] Connected successfully`);
-      this.emit("connected", "server2");
-
-      // Schedule connection stability check before resetting reconnect counter
-      this.scheduleStableConnectionCheck('server2');
-
-      // Send init message
-      this.sendInitMessage(this.ws2, 'server2');
-
-      // ✅ Start heartbeat (replaces old startProtocolHeartbeat)
-      this.heartbeat2.start();
-      console.log(`[Server2] Heartbeat started (30s interval, 10s timeout)`);
-
-    } catch (error) {
-      console.error(`[Server2] Connection failed:`, error);
-      this.state2.connected = false;
-      this.state2.ready = false;
-      this.emit("error", { serverId: 'server2', error });
-      throw error;
-    }
-  }
-
-  /**
-   * Disconnect from all servers
-   */
   disconnect(): void {
-    console.log("[WS Manager] Disconnecting from all servers...");
-
+    console.log("[WS Manager] Disconnecting...");
     this.clearTimers();
 
-    // ✅ Stop heartbeat managers
-    if (this.heartbeat1) {
-      console.log("[Server1] Stopping heartbeat manager");
-      this.heartbeat1.stop();
-      this.heartbeat1 = undefined;
+    if (this.heartbeat) {
+      this.heartbeat.stop();
+      this.heartbeat = undefined;
     }
 
-    if (this.heartbeat2) {
-      console.log("[Server2] Stopping heartbeat manager");
-      this.heartbeat2.stop();
-      this.heartbeat2 = undefined;
-    }
-
-    // ✅ Properly cleanup WebSocket connections to prevent ghost connections
-    if (this.ws1) {
+    if (this.ws) {
       try {
-        console.log("[Server1] Removing all listeners and closing connection");
-        this.ws1.removeAllListeners();
-        if (this.ws1.readyState === WebSocket.OPEN || this.ws1.readyState === WebSocket.CONNECTING) {
-          this.ws1.close();
+        this.ws.removeAllListeners();
+        if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+          this.ws.close();
         }
       } catch (err) {
-        console.warn("[Server1] Error during disconnect:", err);
+        console.warn("[WS] Error during disconnect:", err);
       }
-      this.ws1 = null;
+      this.ws = null;
     }
 
-    if (this.ws2) {
-      try {
-        console.log("[Server2] Removing all listeners and closing connection");
-        this.ws2.removeAllListeners();
-        if (this.ws2.readyState === WebSocket.OPEN || this.ws2.readyState === WebSocket.CONNECTING) {
-          this.ws2.close();
-        }
-      } catch (err) {
-        console.warn("[Server2] Error during disconnect:", err);
-      }
-      this.ws2 = null;
-    }
-
-    this.state1.connected = false;
-    this.state1.ready = false;
-    this.state2.connected = false;
-    this.state2.ready = false;
-    this.sessionServerMap.clear();
+    this.state.connected = false;
+    this.state.ready = false;
     this.activeTasks.clear();
 
-    // Cleanup session cleanup state map
-    for (const [sessionId, state] of this.sessionCleanupStateMap.entries()) {
-      if (state.cleanupTimeoutId) {
-        clearTimeout(state.cleanupTimeoutId);
-      }
+    for (const [, s] of this.sessionCleanupStateMap.entries()) {
+      if (s.cleanupTimeoutId) clearTimeout(s.cleanupTimeoutId);
     }
     this.sessionCleanupStateMap.clear();
 
@@ -493,898 +238,338 @@ export class XiaoYiWebSocketManager extends EventEmitter {
     console.log("[WS Manager] Disconnect complete");
   }
 
-  /**
-   * Send init message to specific server
-   */
-  private sendInitMessage(ws: WebSocket, serverId: ServerId): void {
+  private sendInitMessage(ws: WebSocket): void {
     const initMessage: OutboundWebSocketMessage = {
       msgType: "clawd_bot_init",
       agentId: this.config.agentId,
     };
-
     try {
       ws.send(JSON.stringify(initMessage));
-      console.log(`[${serverId}] Sent clawd_bot_init message`);
+      console.log(`[WS] Sent clawd_bot_init message`);
     } catch (error) {
-      console.error(`[${serverId}] Failed to send init message:`, error);
+      console.error(`[WS] Failed to send init message:`, error);
     }
   }
 
-  /**
-   * Setup WebSocket event handlers for specific server
-   */
-  private setupWebSocketHandlers(ws: WebSocket, serverId: ServerId): void {
+  private setupWebSocketHandlers(ws: WebSocket): void {
     ws.on("open", () => {
-      console.log(`[${serverId}] WebSocket opened`);
+      console.log(`[WS] WebSocket opened`);
     });
 
     ws.on("message", (data: WebSocket.Data) => {
-      this.handleIncomingMessage(data, serverId);
+      this.handleIncomingMessage(data);
     });
 
     ws.on("close", (code: number, reason: Buffer) => {
-      console.log(`[${serverId}] WebSocket closed: ${code} ${reason.toString()}`);
-
-      // Clear stable connection timer - connection was not stable
-      this.clearStableConnectionCheck(serverId);
-
-      if (serverId === 'server1') {
-        this.state1.connected = false;
-        this.state1.ready = false;
-        this.clearProtocolHeartbeat('server1');
-      } else {
-        this.state2.connected = false;
-        this.state2.ready = false;
-        this.clearProtocolHeartbeat('server2');
-      }
-
-      this.emit("disconnected", serverId);
-      this.scheduleReconnect(serverId);
+      console.log(`[WS] WebSocket closed: ${code} ${reason.toString()}`);
+      this.clearStableConnectionCheck();
+      this.state.connected = false;
+      this.state.ready = false;
+      this.emit("disconnected");
+      this.scheduleReconnect();
     });
 
     ws.on("error", (error: Error) => {
-      console.error(`[${serverId}] WebSocket error:`, error);
-      this.emit("error", { serverId, error });
+      console.error(`[WS] WebSocket error:`, error);
+      this.emit("error", { error });
     });
 
     ws.on("pong", () => {
-      if (serverId === 'server1') {
-        this.state1.lastHeartbeat = Date.now();
-      } else {
-        this.state2.lastHeartbeat = Date.now();
-      }
+      this.state.lastHeartbeat = Date.now();
     });
   }
 
-  /**
-   * Extract sessionId from message based on method type
-   * Different methods have sessionId in different locations:
-   * - message/stream: sessionId in params, fallback to top-level sessionId
-   * - tasks/cancel: sessionId at top level
-   * - clearContext: sessionId at top level
-   */
   private extractSessionId(message: any): string | undefined {
-    // For message/stream, prioritize params.sessionId, fallback to top-level sessionId
     if (message.method === "message/stream") {
       return message.params?.sessionId || message.sessionId;
     }
-
-    // For tasks/cancel and clearContext, sessionId is at top level
     if (message.method === "tasks/cancel" ||
         message.method === "clearContext" ||
         message.action === "clear") {
       return message.sessionId;
     }
-
     return undefined;
   }
 
-  /**
-   * Handle incoming message from specific server
-   */
-  private handleIncomingMessage(data: WebSocket.Data, sourceServer: ServerId): void {
+  private handleIncomingMessage(data: WebSocket.Data): void {
     try {
       const message = JSON.parse(data.toString());
 
-      // Log received message
       console.log("\n" + "=".repeat(80));
-      console.log(`[${sourceServer}] Received message:`);
+      console.log(`[WS] Received message:`);
       console.log(JSON.stringify(message, null, 2));
       console.log("=".repeat(80) + "\n");
 
-      // Validate agentId
       if (message.agentId && message.agentId !== this.config.agentId) {
-        console.warn(`[${sourceServer}] Mismatched agentId: ${message.agentId}, expected: ${this.config.agentId}. Discarding.`);
+        console.warn(`[WS] Mismatched agentId: ${message.agentId}, expected: ${this.config.agentId}. Discarding.`);
         return;
       }
 
-      // Extract sessionId based on method type
       const sessionId = this.extractSessionId(message);
-
-      // Record session → server mapping
       if (sessionId) {
-        this.sessionServerMap.set(sessionId, sourceServer);
-        console.log(`[MAP] Session ${sessionId} -> ${sourceServer}`);
+        console.log(`[WS] Session: ${sessionId}`);
       }
 
-      // Handle special messages (clearContext, tasks/cancel)
       if (message.method === "clearContext") {
-        this.handleClearContext(message, sourceServer);
+        this.handleClearContext(message);
         return;
       }
 
       if (message.action === "clear") {
-        this.handleClearMessage(message as A2AClearMessage, sourceServer);
+        this.handleClearMessage(message as A2AClearMessage);
         return;
       }
 
       if (message.method === "tasks/cancel" || message.action === "tasks/cancel") {
-        this.handleTasksCancelMessage(message, sourceServer);
+        this.handleTasksCancelMessage(message);
         return;
       }
 
-      // Handle regular A2A request
       if (this.isA2ARequestMessage(message)) {
-        // Store task for potential cancellation (support params.sessionId or top-level sessionId)
-        const sessionId = message.params?.sessionId || message.sessionId;
-        this.activeTasks.set(message.id, {
-          sessionId: sessionId,
-          timestamp: Date.now(),
-        });
-
-        // Emit with server info
+        const sid = message.params?.sessionId || message.sessionId;
+        this.activeTasks.set(message.id, { sessionId: sid, timestamp: Date.now() });
         this.emit("message", message);
       } else {
-        console.warn(`[${sourceServer}] Unknown message format`);
+        console.warn(`[WS] Unknown message format`);
       }
-
     } catch (error) {
-      console.error(`[${sourceServer}] Failed to parse message:`, error);
-      this.emit("error", { serverId: sourceServer, error });
+      console.error(`[WS] Failed to parse message:`, error);
+      this.emit("error", { error });
     }
   }
 
-  /**
-   * Send A2A response message with automatic routing
-   */
-  async sendResponse(
-    response: A2AResponseMessage,
-    taskId: string,
-    sessionId: string,
-    isFinal: boolean = true,
-    append: boolean = true
-  ): Promise<void> {
-    // Check if session is pending cleanup
+  async sendMessage(sessionId: string, message: OutboundWebSocketMessage): Promise<void> {
     const cleanupState = this.sessionCleanupStateMap.get(sessionId);
     if (cleanupState) {
-      // Session is pending cleanup, silently discard response
-      console.log(`[RESPONSE] Discarding response for pending cleanup session ${sessionId}`);
+      console.log(`[SEND] Discarding message for pending cleanup session ${sessionId}`);
       return;
     }
 
-    // Find which server this session belongs to
-    const targetServer = this.sessionServerMap.get(sessionId);
-
-    if (!targetServer) {
-      console.error(`[ROUTE] Unknown server for session ${sessionId}`);
-      throw new Error(`Cannot route response: unknown session ${sessionId}`);
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error(`WebSocket not connected`);
     }
-
-    // Get the corresponding WebSocket connection
-    const ws = targetServer === 'server1' ? this.ws1 : this.ws2;
-    const state = targetServer === 'server1' ? this.state1 : this.state2;
-
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      console.error(`[ROUTE] ${targetServer} not connected for session ${sessionId}`);
-      throw new Error(`${targetServer} is not available`);
-    }
-
-    // Convert to JSON-RPC format
-    const jsonRpcResponse = this.convertToJsonRpcFormat(response, taskId, isFinal, append);
-
-    const message: OutboundWebSocketMessage = {
-      msgType: "agent_response",
-      agentId: this.config.agentId,
-      sessionId: sessionId,
-      taskId: taskId,
-      msgDetail: JSON.stringify(jsonRpcResponse),
-    };
 
     try {
-      ws.send(JSON.stringify(message));
-      console.log(`[ROUTE] Response sent to ${targetServer} for session ${sessionId} (isFinal=${isFinal}, append=${append})`);
+      this.ws.send(JSON.stringify(message));
+      console.log(`[SEND] Message sent for session ${sessionId}, msgType=${message.msgType}`);
     } catch (error) {
-      console.error(`[ROUTE] Failed to send to ${targetServer}:`, error);
+      console.error(`[SEND] Failed to send:`, error);
       throw error;
     }
   }
 
-  /**
-   * Send clear context response to specific server
-   */
-  async sendClearContextResponse(
-    requestId: string,
-    sessionId: string,
-    success: boolean = true,
-    targetServer?: ServerId
-  ): Promise<void> {
-    const serverId = targetServer || this.sessionServerMap.get(sessionId);
-
-    if (!serverId) {
-      console.error(`[CLEAR] Unknown server for session ${sessionId}`);
-      throw new Error(`Cannot send clear response: unknown session ${sessionId}`);
-    }
-
-    const ws = serverId === 'server1' ? this.ws1 : this.ws2;
-
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      console.error(`[CLEAR] ${serverId} not connected`);
-      throw new Error(`${serverId} is not available`);
+  async sendClearContextResponse(requestId: string, sessionId: string, success: boolean = true): Promise<void> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error(`WebSocket not connected`);
     }
 
     const jsonRpcResponse: A2AJsonRpcResponse = {
       jsonrpc: "2.0",
       id: requestId,
-      result: {
-        status: {
-          state: success ? "cleared" : "failed"
-        }
-      } as A2AClearContextResult,
+      result: { status: { state: success ? "cleared" : "failed" } } as A2AClearContextResult,
     };
 
     const message: OutboundWebSocketMessage = {
       msgType: "agent_response",
       agentId: this.config.agentId,
-      sessionId: sessionId,
+      sessionId,
       taskId: requestId,
       msgDetail: JSON.stringify(jsonRpcResponse),
     };
 
-    console.log(`\n[CLEAR] Sending clearContext response to ${serverId}:`);
-    console.log(`  sessionId: ${sessionId}`);
-    console.log(`  requestId: ${requestId}`);
-    console.log(`  success: ${success}\n`);
-
     try {
-      ws.send(JSON.stringify(message));
+      this.ws.send(JSON.stringify(message));
     } catch (error) {
-      console.error(`[CLEAR] Failed to send to ${serverId}:`, error);
+      console.error(`[CLEAR] Failed to send:`, error);
       throw error;
     }
   }
 
-  /**
-   * Send status update (for intermediate status messages, e.g., timeout warnings)
-   * This uses "status-update" event type which keeps the conversation active
-   */
-  async sendStatusUpdate(
-    taskId: string,
-    sessionId: string,
-    message: string,
-    targetServer?: ServerId
-  ): Promise<void> {
-    // Check if session is pending cleanup
-    const cleanupState = this.sessionCleanupStateMap.get(sessionId);
-    if (cleanupState) {
-      // Session is pending cleanup, silently discard status updates
-      console.log(`[STATUS] Discarding status update for pending cleanup session ${sessionId}`);
-      return;
-    }
-
-    const serverId = targetServer || this.sessionServerMap.get(sessionId);
-
-    if (!serverId) {
-      console.error(`[STATUS] Unknown server for session ${sessionId}`);
-      throw new Error(`Cannot send status update: unknown session ${sessionId}`);
-    }
-
-    const ws = serverId === 'server1' ? this.ws1 : this.ws2;
-
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      console.error(`[STATUS] ${serverId} not connected`);
-      throw new Error(`${serverId} is not available`);
-    }
-
-    // Create unique ID for this status update
-    const messageId = `status_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-    const jsonRpcResponse: A2AJsonRpcResponse = {
-      jsonrpc: "2.0",
-      id: messageId,
-      result: {
-        taskId: taskId,
-        kind: "status-update",
-        final: false, // IMPORTANT: Not final, keeps conversation active
-        status: {
-          message: {
-            role: "agent",
-            parts: [
-              {
-                kind: "text",
-                text: message,
-              },
-            ],
-          },
-          state: "working", // Indicates task is still being processed
-        },
-      } as A2ATaskStatusUpdateEvent,
-    };
-
-    const outboundMessage: OutboundWebSocketMessage = {
-      msgType: "agent_response",
-      agentId: this.config.agentId,
-      sessionId: sessionId,
-      taskId: taskId,
-      msgDetail: JSON.stringify(jsonRpcResponse),
-    };
-
-    console.log(`[STATUS] Sending status update to ${serverId}:`);
-    console.log(`  sessionId: ${sessionId}`);
-    console.log(`  taskId: ${taskId}`);
-    console.log(`  message: ${message}`);
-    console.log(`  final: false, state: working\n`);
-
-    try {
-      ws.send(JSON.stringify(outboundMessage));
-    } catch (error) {
-      console.error(`[STATUS] Failed to send to ${serverId}:`, error);
-      throw error;
-    }
-  }
-
-  /**
-   * Send PUSH message (主动推送) via HTTP API
-   *
-   * This is used when SubAgent completes execution and needs to push results to user
-   * independently of the original A2A request-response flow.
-   *
-   * Unlike sendResponse (which responds to a specific request via WebSocket), push messages are
-   * sent through HTTP API asynchronously.
-   *
-   * @param sessionId - User's session ID
-   * @param message - Message content to push
-   *
-   * Reference: 华为小艺推送消息 API
-   * TODO: 实现实际的推送消息发送逻辑
-   */
-  async sendPushMessage(
-    sessionId: string,
-    message: string
-  ): Promise<void> {
-    console.log(`[PUSH] Would send push message to session ${sessionId}, length: ${message.length} chars`);
-    console.log(`[PUSH] Content: ${message.substring(0, 50)}${message.length > 50 ? "..." : ""}`);
-    // TODO: Implement actual push message sending via HTTP API
-    // Need to confirm correct push message format with XiaoYi API documentation
-  }
-
-  /**
-   * Send an outbound WebSocket message directly.
-   * This is a low-level method that sends a pre-formatted OutboundWebSocketMessage.
-   *
-   * @param sessionId - Session ID for routing
-   * @param message - Pre-formatted outbound message
-   */
-  async sendMessage(
-    sessionId: string,
-    message: OutboundWebSocketMessage
-  ): Promise<void> {
-    // Check if session is pending cleanup
-    const cleanupState = this.sessionCleanupStateMap.get(sessionId);
-    if (cleanupState) {
-      console.log(`[SEND_MESSAGE] Discarding message for pending cleanup session ${sessionId}`);
-      return;
-    }
-
-    // Find which server this session belongs to
-    const targetServer = this.sessionServerMap.get(sessionId);
-
-    if (!targetServer) {
-      console.error(`[SEND_MESSAGE] Unknown server for session ${sessionId}`);
-      throw new Error(`Cannot route message: unknown session ${sessionId}`);
-    }
-
-    // Get the corresponding WebSocket connection
-    const ws = targetServer === 'server1' ? this.ws1 : this.ws2;
-    const state = targetServer === 'server1' ? this.state1 : this.state2;
-
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      console.error(`[SEND_MESSAGE] ${targetServer} not connected for session ${sessionId}`);
-      throw new Error(`${targetServer} is not available`);
-    }
-
-    try {
-      ws.send(JSON.stringify(message));
-      console.log(`[SEND_MESSAGE] Message sent to ${targetServer} for session ${sessionId}, msgType=${message.msgType}`);
-    } catch (error) {
-      console.error(`[SEND_MESSAGE] Failed to send to ${targetServer}:`, error);
-      throw error;
-    }
-  }
-
-  /**
-   * Send tasks cancel response to specific server
-   */
-  async sendTasksCancelResponse(
-    requestId: string,
-    sessionId: string,
-    success: boolean = true,
-    targetServer?: ServerId
-  ): Promise<void> {
-    const serverId = targetServer || this.sessionServerMap.get(sessionId);
-
-    if (!serverId) {
-      console.error(`[CANCEL] Unknown server for session ${sessionId}`);
-      throw new Error(`Cannot send cancel response: unknown session ${sessionId}`);
-    }
-
-    const ws = serverId === 'server1' ? this.ws1 : this.ws2;
-
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      console.error(`[CANCEL] ${serverId} not connected`);
-      throw new Error(`${serverId} is not available`);
+  async sendTasksCancelResponse(requestId: string, sessionId: string, success: boolean = true): Promise<void> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error(`WebSocket not connected`);
     }
 
     const jsonRpcResponse: A2AJsonRpcResponse = {
       jsonrpc: "2.0",
       id: requestId,
-      result: {
-        id: requestId,
-        status: {
-          state: success ? "canceled" : "failed"
-        }
-      } as A2ATasksCancelResult,
+      result: { id: requestId, status: { state: success ? "canceled" : "failed" } } as A2ATasksCancelResult,
     };
 
     const message: OutboundWebSocketMessage = {
       msgType: "agent_response",
       agentId: this.config.agentId,
-      sessionId: sessionId,
+      sessionId,
       taskId: requestId,
       msgDetail: JSON.stringify(jsonRpcResponse),
     };
 
     try {
-      ws.send(JSON.stringify(message));
+      this.ws.send(JSON.stringify(message));
     } catch (error) {
-      console.error(`[CANCEL] Failed to send to ${serverId}:`, error);
+      console.error(`[CANCEL] Failed to send:`, error);
       throw error;
     }
   }
 
-  /**
-   * Handle clearContext method
-   */
-  private handleClearContext(message: any, sourceServer: ServerId): void {
+  private handleClearContext(message: any): void {
     const sessionId = this.extractSessionId(message);
     if (!sessionId) {
-      console.error(`[${sourceServer}] Failed to extract sessionId from clearContext message`);
+      console.error(`[WS] Failed to extract sessionId from clearContext message`);
       return;
     }
-
-    console.log(`[${sourceServer}] Received clearContext for session: ${sessionId}`);
-
-    this.sendClearContextResponse(message.id, sessionId, true, sourceServer)
-      .catch(error => console.error(`[${sourceServer}] Failed to send clearContext response:`, error));
-
-    this.emit("clear", {
-      sessionId: sessionId,
-      id: message.id,
-      serverId: sourceServer,
-    });
-
-    // Mark session for cleanup instead of immediate deletion
-    this.markSessionForCleanup(sessionId, sourceServer, this.config.sessionCleanupTimeoutMs ?? XiaoYiWebSocketManager.DEFAULT_CLEANUP_TIMEOUT_MS);
+    console.log(`[WS] Received clearContext for session: ${sessionId}`);
+    this.sendClearContextResponse(message.id, sessionId, true)
+      .catch(error => console.error(`[WS] Failed to send clearContext response:`, error));
+    this.emit("clear", { sessionId, id: message.id });
+    this.markSessionForCleanup(sessionId, this.config.sessionCleanupTimeoutMs ?? XiaoYiWebSocketManager.DEFAULT_CLEANUP_TIMEOUT_MS);
   }
 
-  /**
-   * Handle clear message (legacy format)
-   */
-  private handleClearMessage(message: A2AClearMessage, sourceServer: ServerId): void {
-    console.log(`[${sourceServer}] Received clear message for session: ${message.sessionId}`);
-
-    this.sendClearContextResponse(message.id, message.sessionId, true, sourceServer)
-      .catch(error => console.error(`[${sourceServer}] Failed to send clear response:`, error));
-
-    this.emit("clear", {
-      sessionId: message.sessionId,
-      id: message.id,
-      serverId: sourceServer,
-    });
-
-    // Mark session for cleanup instead of immediate deletion
-    this.markSessionForCleanup(message.sessionId, sourceServer, this.config.sessionCleanupTimeoutMs ?? XiaoYiWebSocketManager.DEFAULT_CLEANUP_TIMEOUT_MS);
+  private handleClearMessage(message: A2AClearMessage): void {
+    console.log(`[WS] Received clear message for session: ${message.sessionId}`);
+    this.sendClearContextResponse(message.id, message.sessionId, true)
+      .catch(error => console.error(`[WS] Failed to send clear response:`, error));
+    this.emit("clear", { sessionId: message.sessionId, id: message.id });
+    this.markSessionForCleanup(message.sessionId, this.config.sessionCleanupTimeoutMs ?? XiaoYiWebSocketManager.DEFAULT_CLEANUP_TIMEOUT_MS);
   }
 
-  /**
-   * Handle tasks/cancel message
-   */
-  private handleTasksCancelMessage(message: A2ATasksCancelMessage, sourceServer: ServerId): void {
+  private handleTasksCancelMessage(message: any): void {
     const sessionId = this.extractSessionId(message);
     if (!sessionId) {
-      console.error(`[${sourceServer}] Failed to extract sessionId from tasks/cancel message`);
+      console.error(`[WS] Failed to extract sessionId from tasks/cancel message`);
       return;
     }
-
     const effectiveTaskId = message.taskId || message.id;
-
-    console.log("\n" + "=".repeat(60));
-    console.log(`[${sourceServer}] Received cancel request`);
-    console.log(`  Session: ${sessionId}`);
-    console.log(`  Task ID: ${effectiveTaskId}`);
-    console.log("=".repeat(60) + "\n");
-
-    this.sendTasksCancelResponse(message.id, sessionId, true, sourceServer)
-      .catch(error => console.error(`[${sourceServer}] Failed to send cancel response:`, error));
-
-    this.emit("cancel", {
-      sessionId: sessionId,
-      taskId: effectiveTaskId,
-      id: message.id,
-      serverId: sourceServer,
-    });
-
+    console.log(`[WS] Received cancel: session=${sessionId}, task=${effectiveTaskId}`);
+    this.sendTasksCancelResponse(message.id, sessionId, true)
+      .catch(error => console.error(`[WS] Failed to send cancel response:`, error));
+    this.emit("cancel", { sessionId, taskId: effectiveTaskId, id: message.id });
     this.activeTasks.delete(effectiveTaskId);
   }
 
-  /**
-   * Convert A2AResponseMessage to JSON-RPC 2.0 format
-   */
-  private convertToJsonRpcFormat(
-    response: A2AResponseMessage,
-    taskId: string,
-    isFinal: boolean = true,
-    append: boolean = true
-  ): A2AJsonRpcResponse {
-    const artifactId = `artifact_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-    if (response.status === "error" && response.error) {
-      return {
-        jsonrpc: "2.0",
-        id: response.messageId,
-        error: {
-          code: response.error.code,
-          message: response.error.message,
-        },
-      };
-    }
-
-    const parts: Array<{
-      kind: "text" | "file" | "data";
-      text?: string;
-      file?: {
-        name: string;
-        mimeType: string;
-        bytes?: string;
-        uri?: string;
-      };
-      data?: any;
-    }> = [];
-
-    if (response.content.type === "text" && response.content.text) {
-      // When isFinal=true, use empty string for text (no content needed for final chunk)
-      const textContent = isFinal ? "" : response.content.text;
-      parts.push({
-        kind: "text",
-        text: textContent,
-      });
-    } else if (response.content.type === "file") {
-      parts.push({
-        kind: "file",
-        file: {
-          name: response.content.fileName || "file",
-          mimeType: response.content.mimeType || "application/octet-stream",
-          uri: response.content.mediaUrl,
-        },
-      });
-    }
-
-    // When isFinal=true, append should be true and text should be empty
-    const artifactEvent: A2ATaskArtifactUpdateEvent = {
-      taskId: taskId,
-      kind: "artifact-update",
-      append: isFinal ? true : append,
-      lastChunk: isFinal,
-      final: isFinal,
-      artifact: {
-        artifactId: artifactId,
-        parts: parts,
-      },
-    };
-
-    return {
-      jsonrpc: "2.0",
-      id: response.messageId,
-      result: artifactEvent,
-    };
+  private isA2ARequestMessage(data: any): data is A2ARequestMessage {
+    return data &&
+      typeof data.agentId === "string" &&
+      data.jsonrpc === "2.0" &&
+      typeof data.id === "string" &&
+      data.method === "message/stream" &&
+      data.params &&
+      typeof data.params.id === "string" &&
+      (typeof data.params.sessionId === "string" || typeof data.sessionId === "string") &&
+      data.params.message &&
+      typeof data.params.message.role === "string" &&
+      Array.isArray(data.params.message.parts);
   }
 
-  /**
-   * Check if at least one server is ready
-   */
   isReady(): boolean {
-    return (this.state1.ready && this.ws1?.readyState === WebSocket.OPEN) ||
-           (this.state2.ready && this.ws2?.readyState === WebSocket.OPEN);
+    return this.state.ready && this.ws?.readyState === WebSocket.OPEN;
   }
 
-  /**
-   * Get combined connection state
-   */
   getState(): WebSocketConnectionState {
-    const connected = this.state1.connected || this.state2.connected;
-    const authenticated = connected; // Auth via headers
-
     return {
-      connected,
-      authenticated,
-      lastHeartbeat: Math.max(this.state1.lastHeartbeat, this.state2.lastHeartbeat),
+      connected: this.state.connected,
+      authenticated: this.state.connected,
+      lastHeartbeat: this.state.lastHeartbeat,
       lastAppHeartbeat: 0,
-      reconnectAttempts: Math.max(this.state1.reconnectAttempts, this.state2.reconnectAttempts),
+      reconnectAttempts: this.state.reconnectAttempts,
       maxReconnectAttempts: 50,
     };
   }
 
-  /**
-   * Get individual server states
-   */
-  getServerStates(): { server1: ServerConnectionState; server2: ServerConnectionState } {
-    return {
-      server1: { ...this.state1 },
-      server2: { ...this.state2 },
-    };
+  getActiveTasks(): Map<string, any> {
+    return new Map(this.activeTasks);
   }
 
-  /**
-   * Start protocol-level heartbeat for specific server
-   */
-  private startProtocolHeartbeat(serverId: ServerId): void {
-    const interval = setInterval(() => {
-      const ws = serverId === 'server1' ? this.ws1 : this.ws2;
-      const state = serverId === 'server1' ? this.state1 : this.state2;
+  removeActiveTask(taskId: string): void {
+    this.activeTasks.delete(taskId);
+  }
 
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.ping();
+  // ==================== Reconnect ====================
 
-        const now = Date.now();
-        if (state.lastHeartbeat > 0 && now - state.lastHeartbeat > 90000) {
-          console.warn(`[${serverId}] Heartbeat timeout, reconnecting...`);
-          ws.close();
-        }
+  private scheduleReconnect(): void {
+    if (this.state.reconnectAttempts >= 50) {
+      console.error(`[WS] Max reconnection attempts reached`);
+      this.emit("maxReconnectAttemptsReached");
+      return;
+    }
+
+    const delay = Math.min(2000 * Math.pow(2, this.state.reconnectAttempts), 60000);
+    this.state.reconnectAttempts++;
+
+    console.log(`[WS] Scheduling reconnect attempt ${this.state.reconnectAttempts}/50 in ${delay}ms`);
+
+    this.reconnectTimeout = setTimeout(async () => {
+      try {
+        await this.connectWs();
+        console.log(`[WS] Reconnected successfully`);
+      } catch (error) {
+        console.error(`[WS] Reconnection failed:`, error);
+        this.scheduleReconnect();
       }
-    }, 30000);
+    }, delay);
+  }
 
-    if (serverId === 'server1') {
-      this.heartbeatTimeout1 = interval;
-    } else {
-      this.heartbeatTimeout2 = interval;
+  private clearTimers(): void {
+    if (this.appHeartbeatInterval) {
+      clearInterval(this.appHeartbeatInterval);
+      this.appHeartbeatInterval = undefined;
+    }
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = undefined;
+    }
+    this.clearStableConnectionCheck();
+  }
+
+  private scheduleStableConnectionCheck(): void {
+    this.stableConnectionTimer = setTimeout(() => {
+      if (this.state.connected) {
+        console.log(`[WS] Connection stable for ${XiaoYiWebSocketManager.STABLE_CONNECTION_THRESHOLD}ms, resetting reconnect counter`);
+        this.state.reconnectAttempts = 0;
+      }
+    }, XiaoYiWebSocketManager.STABLE_CONNECTION_THRESHOLD);
+  }
+
+  private clearStableConnectionCheck(): void {
+    if (this.stableConnectionTimer) {
+      clearTimeout(this.stableConnectionTimer);
+      this.stableConnectionTimer = undefined;
     }
   }
 
-  /**
-   * Clear protocol heartbeat for specific server
-   */
-  private clearProtocolHeartbeat(serverId: ServerId): void {
-    const interval = serverId === 'server1' ? this.heartbeatTimeout1 : this.heartbeatTimeout2;
+  // ==================== App Heartbeat ====================
 
-    if (interval) {
-      clearInterval(interval);
-      if (serverId === 'server1') {
-        this.heartbeatTimeout1 = undefined;
-      } else {
-        this.heartbeatTimeout2 = undefined;
-      }
-    }
-  }
-
-  /**
-   * Start application-level heartbeat (shared across both servers)
-   */
   private startAppHeartbeat(): void {
     this.appHeartbeatInterval = setInterval(() => {
       const heartbeatMessage: OutboundWebSocketMessage = {
         msgType: "heartbeat",
         agentId: this.config.agentId,
       };
-
-      // Send to all connected servers
-      if (this.ws1?.readyState === WebSocket.OPEN) {
+      if (this.ws?.readyState === WebSocket.OPEN) {
         try {
-          this.ws1.send(JSON.stringify(heartbeatMessage));
+          this.ws.send(JSON.stringify(heartbeatMessage));
         } catch (error) {
-          console.error('[Server1] Failed to send app heartbeat:', error);
-        }
-      }
-
-      if (this.ws2?.readyState === WebSocket.OPEN) {
-        try {
-          this.ws2.send(JSON.stringify(heartbeatMessage));
-        } catch (error) {
-          console.error('[Server2] Failed to send app heartbeat:', error);
+          console.error('[WS] Failed to send app heartbeat:', error);
         }
       }
     }, 20000);
   }
 
-  /**
-   * Schedule reconnection for specific server
-   */
-  private scheduleReconnect(serverId: ServerId): void {
-    const state = serverId === 'server1' ? this.state1 : this.state2;
+  // ==================== Session Cleanup ====================
 
-    if (state.reconnectAttempts >= 50) {
-      console.error(`[${serverId}] Max reconnection attempts reached`);
-      this.emit("maxReconnectAttemptsReached", serverId);
-      return;
-    }
-
-    const delay = Math.min(2000 * Math.pow(2, state.reconnectAttempts), 60000);
-    state.reconnectAttempts++;
-
-    console.log(`[${serverId}] Scheduling reconnect attempt ${state.reconnectAttempts}/50 in ${delay}ms`);
-
-    const timeout = setTimeout(async () => {
-      try {
-        if (serverId === 'server1') {
-          await this.connectToServer1();
-        } else {
-          await this.connectToServer2();
-        }
-        console.log(`[${serverId}] Reconnected successfully`);
-      } catch (error) {
-        console.error(`[${serverId}] Reconnection failed:`, error);
-        this.scheduleReconnect(serverId);
-      }
-    }, delay);
-
-    if (serverId === 'server1') {
-      this.reconnectTimeout1 = timeout;
-    } else {
-      this.reconnectTimeout2 = timeout;
-    }
-  }
-
-  /**
-   * Clear all timers
-   */
-  private clearTimers(): void {
-    if (this.heartbeatTimeout1) {
-      clearInterval(this.heartbeatTimeout1);
-      this.heartbeatTimeout1 = undefined;
-    }
-
-    if (this.heartbeatTimeout2) {
-      clearInterval(this.heartbeatTimeout2);
-      this.heartbeatTimeout2 = undefined;
-    }
-
-    if (this.appHeartbeatInterval) {
-      clearInterval(this.appHeartbeatInterval);
-      this.appHeartbeatInterval = undefined;
-    }
-
-    if (this.reconnectTimeout1) {
-      clearTimeout(this.reconnectTimeout1);
-      this.reconnectTimeout1 = undefined;
-    }
-
-    if (this.reconnectTimeout2) {
-      clearTimeout(this.reconnectTimeout2);
-      this.reconnectTimeout2 = undefined;
-    }
-
-    // Clear stable connection timers
-    this.clearStableConnectionCheck('server1');
-    this.clearStableConnectionCheck('server2');
-  }
-
-  /**
-   * Schedule a connection stability check
-   * Only reset reconnect counter after connection has been stable for threshold time
-   */
-  private scheduleStableConnectionCheck(serverId: ServerId): void {
-    const timer = setTimeout(() => {
-      const state = serverId === 'server1' ? this.state1 : this.state2;
-      if (state.connected) {
-        console.log(`[${serverId}] Connection stable for ${XiaoYiWebSocketManager.STABLE_CONNECTION_THRESHOLD}ms, resetting reconnect counter`);
-        state.reconnectAttempts = 0;
-      }
-    }, XiaoYiWebSocketManager.STABLE_CONNECTION_THRESHOLD);
-
-    if (serverId === 'server1') {
-      this.stableConnectionTimer1 = timer;
-    } else {
-      this.stableConnectionTimer2 = timer;
-    }
-  }
-
-  /**
-   * Clear the connection stability check timer
-   */
-  private clearStableConnectionCheck(serverId: ServerId): void {
-    const timer = serverId === 'server1' ? this.stableConnectionTimer1 : this.stableConnectionTimer2;
-
-    if (timer) {
-      clearTimeout(timer);
-      if (serverId === 'server1') {
-        this.stableConnectionTimer1 = undefined;
-      } else {
-        this.stableConnectionTimer2 = undefined;
-      }
-    }
-  }
-
-  /**
-   * Type guard for A2A request messages
-   * sessionId can be in params OR at top level (fallback)
-   */
-  private isA2ARequestMessage(data: any): data is A2ARequestMessage {
-    return data &&
-           typeof data.agentId === "string" &&
-           data.jsonrpc === "2.0" &&
-           typeof data.id === "string" &&
-           data.method === "message/stream" &&
-           data.params &&
-           typeof data.params.id === "string" &&
-           // sessionId can be in params OR at top level
-           (typeof data.params.sessionId === "string" || typeof data.sessionId === "string") &&
-           data.params.message &&
-           typeof data.params.message.role === "string" &&
-           Array.isArray(data.params.message.parts);
-  }
-
-  /**
-   * Get active tasks
-   */
-  getActiveTasks(): Map<string, any> {
-    return new Map(this.activeTasks);
-  }
-
-  /**
-   * Remove task from active tasks
-   */
-  removeActiveTask(taskId: string): void {
-    this.activeTasks.delete(taskId);
-  }
-
-  /**
-   * Get server for a specific session
-   */
-  getServerForSession(sessionId: string): ServerId | undefined {
-    return this.sessionServerMap.get(sessionId);
-  }
-
-  /**
-   * Remove session mapping
-   */
-  removeSession(sessionId: string): void {
-    this.sessionServerMap.delete(sessionId);
-  }
-
-  /**
-   * Mark a session for delayed cleanup
-   * @param sessionId The session ID to mark for cleanup
-   * @param serverId The server ID associated with this session
-   * @param timeoutMs Timeout in milliseconds before forcing cleanup
-   */
-  private markSessionForCleanup(sessionId: string, serverId: ServerId, timeoutMs: number): void {
-    // Check if already marked
+  private markSessionForCleanup(sessionId: string, timeoutMs: number): void {
     const existingState = this.sessionCleanupStateMap.get(sessionId);
     if (existingState) {
-      // Already pending cleanup, reset timeout
-      if (existingState.cleanupTimeoutId) {
-        clearTimeout(existingState.cleanupTimeoutId);
-      }
+      if (existingState.cleanupTimeoutId) clearTimeout(existingState.cleanupTimeoutId);
       console.log(`[CLEANUP] Session ${sessionId} already pending cleanup, resetting timeout`);
     }
 
-    // Create new cleanup state
     const newState: SessionCleanupState = {
       sessionId,
-      serverId,
       markedForCleanupAt: Date.now(),
       reason: 'user_cleared',
     };
 
-    // Start cleanup timeout
     const timeoutId = setTimeout(() => {
       console.log(`[CLEANUP] Timeout reached for session ${sessionId}, forcing cleanup`);
       this.forceCleanupSession(sessionId);
@@ -1392,61 +577,28 @@ export class XiaoYiWebSocketManager extends EventEmitter {
 
     newState.cleanupTimeoutId = timeoutId;
     this.sessionCleanupStateMap.set(sessionId, newState);
-
     console.log(`[CLEANUP] Session ${sessionId} marked for cleanup (timeout: ${timeoutMs}ms)`);
   }
 
-  /**
-   * Force cleanup a session immediately
-   * @param sessionId The session ID to cleanup
-   */
   forceCleanupSession(sessionId: string): void {
-    // Check if already cleaned
     const state = this.sessionCleanupStateMap.get(sessionId);
-    if (!state) {
-      console.log(`[CLEANUP] Session ${sessionId} already cleaned up, skipping`);
-      return;
-    }
+    if (!state) return;
 
-    // Clear timeout
-    if (state.cleanupTimeoutId) {
-      clearTimeout(state.cleanupTimeoutId);
-    }
-
-    // Remove from both maps
-    this.sessionServerMap.delete(sessionId);
+    if (state.cleanupTimeoutId) clearTimeout(state.cleanupTimeoutId);
     this.sessionCleanupStateMap.delete(sessionId);
-
     console.log(`[CLEANUP] Session ${sessionId} cleanup completed`);
   }
 
-  /**
-   * Check if a session is pending cleanup
-   * @param sessionId The session ID to check
-   * @returns True if session is pending cleanup
-   */
   isSessionPendingCleanup(sessionId: string): boolean {
     return this.sessionCleanupStateMap.has(sessionId);
   }
 
-  /**
-   * Get cleanup state for a session
-   * @param sessionId The session ID to check
-   * @returns Cleanup state if exists, undefined otherwise
-   */
   getSessionCleanupState(sessionId: string): SessionCleanupState | undefined {
     return this.sessionCleanupStateMap.get(sessionId);
   }
 
-  /**
-   * Update accumulated text for a pending cleanup session
-   * @param sessionId The session ID
-   * @param text The accumulated text
-   */
   updateAccumulatedTextForCleanup(sessionId: string, text: string): void {
     const state = this.sessionCleanupStateMap.get(sessionId);
-    if (state) {
-      state.accumulatedText = text;
-    }
+    if (state) state.accumulatedText = text;
   }
 }

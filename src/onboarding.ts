@@ -26,7 +26,7 @@ function isXiaoYiConfigured(config: XiaoYiChannelConfig | undefined): boolean {
     return false;
   }
   // Check required fields: ak, sk, agentId
-  // wsUrl1/wsUrl2 are optional (defaults will be used if not provided)
+  // wsUrl1 is optional (default will be used if not provided)
   const hasAk = typeof config.ak === "string" && config.ak.trim().length > 0;
   const hasSk = typeof config.sk === "string" && config.sk.trim().length > 0;
   const hasAgentId = typeof config.agentId === "string" && config.agentId.trim().length > 0;
@@ -46,7 +46,6 @@ function setXiaoYiConfig(
     enabled: config.enabled ?? existing?.enabled ?? true,
     wsUrl: config.wsUrl ?? existing?.wsUrl ?? "",
     wsUrl1: config.wsUrl1 ?? existing?.wsUrl1 ?? "",
-    wsUrl2: config.wsUrl2 ?? existing?.wsUrl2 ?? "",
     ak: config.ak ?? existing?.ak ?? "",
     sk: config.sk ?? existing?.sk ?? "",
     agentId: config.agentId ?? existing?.agentId ?? "",
@@ -149,9 +148,6 @@ export const xiaoyiOnboardingAdapter: ChannelOnboardingAdapter = {
       statusLines.push(`XiaoYi: ${enabled ? "enabled" : "disabled"}`);
       if (config?.wsUrl1 || config?.wsUrl) {
         statusLines.push(`  WebSocket: ${config.wsUrl1 || config.wsUrl}`);
-      }
-      if (config?.wsUrl2) {
-        statusLines.push(`  Secondary: ${config.wsUrl2}`);
       }
       if (config?.agentId) {
         statusLines.push(`  Agent ID: ${config.agentId}`);

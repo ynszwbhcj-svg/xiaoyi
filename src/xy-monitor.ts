@@ -74,9 +74,6 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
     wsManager.setHealthEventCallback(trackEvent);
   }
 
-  // Track logged servers to avoid duplicate logs
-  const loggedServers = new Set<string>();
-
   // Track active message processing to detect duplicates
   const activeMessages = new Set<string>();
 
@@ -88,69 +85,57 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
 
   return new Promise<void>((resolve, reject) => {
     // Event handlers (defined early so they can be referenced in cleanup)
-    const messageHandler = (message: any, sessionId: string, serverId: string) => {
+    const messageHandler = (message: any) => {
+      // Extract sessionId from message for queue routing
+      const sessionId = message.params?.sessionId || message.sessionId || message.id;
       const messageKey = `${sessionId}::${message.id}`;
 
-      log(`[MONITOR-HANDLER] ####### messageHandler triggered: serverId=${serverId}, sessionId=${sessionId}, messageId=${message.id} #######`);
+      log(`[MONITOR-HANDLER] messageHandler triggered: sessionId=${sessionId}, messageId=${message.id}`);
 
-      // ✅ Report health: received a message
       trackEvent?.();
 
-      // Check for duplicate message handling
       if (activeMessages.has(messageKey)) {
-        error(`[MONITOR-HANDLER] ⚠️ WARNING: Duplicate message detected! messageKey=${messageKey}, this may cause duplicate dispatchers!`);
+        error(`[MONITOR-HANDLER] Duplicate message detected! messageKey=${messageKey}`);
       }
 
       activeMessages.add(messageKey);
-      log(`[MONITOR-HANDLER] 📝 Active messages count: ${activeMessages.size}, messageKey: ${messageKey}`);
+      log(`[MONITOR-HANDLER] Active messages count: ${activeMessages.size}, messageKey: ${messageKey}`);
 
       const task = async () => {
         try {
-          log(`[MONITOR-HANDLER] 🚀 Starting handleXYMessage for messageKey=${messageKey}`);
+          log(`[MONITOR-HANDLER] Starting handleXYMessage for messageKey=${messageKey}`);
           await handleXYMessage({
             cfg,
             runtime,
             message,
-            accountId,  // ✅ Pass accountId ("default")
+            accountId,
           });
-          log(`[MONITOR-HANDLER] ✅ Completed handleXYMessage for messageKey=${messageKey}`);
+          log(`[MONITOR-HANDLER] Completed handleXYMessage for messageKey=${messageKey}`);
         } catch (err) {
-          // ✅ Only log error, don't re-throw to prevent gateway restart
-          error(`XY gateway: error handling message from ${serverId}: ${String(err)}`);
+          error(`XY gateway: error handling message: ${String(err)}`);
         } finally {
-          // Remove from active messages when done
           activeMessages.delete(messageKey);
-          log(`[MONITOR-HANDLER] 🧹 Cleaned up messageKey=${messageKey}, remaining active: ${activeMessages.size}`);
         }
       };
       void enqueue(sessionId, task).catch((err) => {
-        // Error already logged in task, this is for queue failures
         error(`XY gateway: queue processing failed for session ${sessionId}: ${String(err)}`);
         activeMessages.delete(messageKey);
       });
     };
 
-    const connectedHandler = (serverId: string) => {
-      if (!loggedServers.has(serverId)) {
-        log(`XY gateway: ${serverId} connected`);
-        loggedServers.add(serverId);
-      }
-      // ✅ Report health: connection established
+    const connectedHandler = () => {
+      log(`XY gateway: connected`);
       trackEvent?.();
       opts.setStatus?.({ connected: true });
     };
 
-    const disconnectedHandler = (serverId: string) => {
-      console.warn(`XY gateway: ${serverId} disconnected`);
-      loggedServers.delete(serverId);
-      // ✅ Report disconnection status (only if all servers disconnected)
-      if (loggedServers.size === 0) {
-        opts.setStatus?.({ connected: false });
-      }
+    const disconnectedHandler = () => {
+      console.warn(`XY gateway: disconnected`);
+      opts.setStatus?.({ connected: false });
     };
 
-    const errorHandler = (err: Error, serverId: string) => {
-      error(`XY gateway: ${serverId} error: ${String(err)}`);
+    const errorHandler = (err: Error) => {
+      error(`XY gateway: error: ${String(err)}`);
     };
 
     const cleanup = () => {
@@ -173,7 +158,6 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
       // removeXYWebSocketManager internally calls manager.disconnect()
       removeXYWebSocketManager(account);
 
-      loggedServers.clear();
       activeMessages.clear();
       log(`[MONITOR-HANDLER] 🧹 Cleanup complete, cleared active messages`);
     };
