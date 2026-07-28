@@ -84,10 +84,17 @@ test("declares the OpenClaw 2026.7.1 compatibility floor", async () => {
   assert.equal(packageJson.openclaw.compat.pluginApi, ">=2026.7.1");
   assert.equal(packageJson.openclaw.build.openclawVersion, "2026.7.1");
   assert.equal(packageJson.openclaw.install.minHostVersion, ">=2026.7.1");
+  assert.equal(packageJson.dependencies["node-fetch"], undefined);
 
   const manifest = JSON.parse(
     await readFile(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
   );
   assert.equal(manifest.channelConfigs.xiaoyi.schema.type, "object");
   assert.equal(manifest.channelConfigs.xiaoyi.uiHints.sk.sensitive, true);
+});
+
+test("loads the file download module with the Node.js native fetch runtime", async () => {
+  const fileDownload = await import("../dist/file-download.js");
+  assert.equal(typeof fileDownload.downloadFile, "function");
+  assert.equal(typeof fileDownload.downloadFilesFromParts, "function");
 });
