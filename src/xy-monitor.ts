@@ -1,16 +1,19 @@
 // Monitor for XY channel WebSocket connections
 // Follows feishu/monitor.account.ts and feishu/monitor.transport.ts pattern
-import type { RuntimeEnv } from "openclaw/plugin-sdk";
+import type { ChannelAccountSnapshot } from "openclaw/plugin-sdk/channel-contract";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
+import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { resolveXYConfig } from "./xy-config.js";
 import { getXYWebSocketManager, removeXYWebSocketManager } from "./xy-client.js";
 import { handleXYMessage } from "./xy-bot.js";
+import type { A2AJsonRpcRequest } from "./types.js";
 
 export type MonitorXYOpts = {
-  config?: any;
+  config?: OpenClawConfig;
   runtime?: RuntimeEnv;
   abortSignal?: AbortSignal;
   accountId?: string;
-  setStatus?: (status: { lastEventAt?: number; lastInboundAt?: number; connected?: boolean }) => void;
+  setStatus?: (status: Omit<ChannelAccountSnapshot, "accountId">) => void;
 };
 
 /**
@@ -55,11 +58,10 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
   const accountId = opts.accountId ?? "default";
 
   // Create trackEvent function to report health to OpenClaw framework
-  const trackEvent = opts.setStatus
-    ? () => {
-        opts.setStatus!({ lastEventAt: Date.now(), lastInboundAt: Date.now() });
-      }
-    : undefined;
+  const trackTransportActivity = () => {
+    const now = Date.now();
+    opts.setStatus?.({ lastEventAt: now, lastTransportActivityAt: now });
+  };
 
   // 🔍 Diagnose WebSocket managers before gateway start
   // console.log("🔍 [DIAGNOSTICS] Checking WebSocket managers before gateway start...");
@@ -70,9 +72,7 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
 
   // ✅ Set health event callback for heartbeat reporting
   // This ensures OpenClaw's health-monitor sees activity and doesn't trigger stale-socket restarts
-  if (trackEvent) {
-    wsManager.setHealthEventCallback(trackEvent);
-  }
+  wsManager.setHealthEventCallback(trackTransportActivity);
 
   // Track active message processing to detect duplicates
   const activeMessages = new Set<string>();
@@ -80,22 +80,27 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
   // Create session queue for ordered message processing
   const enqueue = createSessionQueue();
 
-  // Health check interval
-  let healthCheckInterval: NodeJS.Timeout | null = null;
+  return new Promise<void>((resolve) => {
+    let cleanedUp = false;
 
-  return new Promise<void>((resolve, reject) => {
     // Event handlers (defined early so they can be referenced in cleanup)
-    const messageHandler = (message: any) => {
+    const messageHandler = (message: A2AJsonRpcRequest) => {
       // Extract sessionId from message for queue routing
-      const sessionId = message.params?.sessionId || message.sessionId || message.id;
+      const sessionId = message.params?.sessionId || message.id;
       const messageKey = `${sessionId}::${message.id}`;
 
       log(`[MONITOR-HANDLER] messageHandler triggered: sessionId=${sessionId}, messageId=${message.id}`);
 
-      trackEvent?.();
+      const now = Date.now();
+      opts.setStatus?.({
+        lastEventAt: now,
+        lastInboundAt: now,
+        lastMessageAt: now,
+      });
 
       if (activeMessages.has(messageKey)) {
         error(`[MONITOR-HANDLER] Duplicate message detected! messageKey=${messageKey}`);
+        return;
       }
 
       activeMessages.add(messageKey);
@@ -125,28 +130,42 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
 
     const connectedHandler = () => {
       log(`XY gateway: connected`);
-      trackEvent?.();
-      opts.setStatus?.({ connected: true });
+      const now = Date.now();
+      opts.setStatus?.({
+        connected: true,
+        running: true,
+        statusState: "ready",
+        lastConnectedAt: now,
+        lastEventAt: now,
+        lastTransportActivityAt: now,
+        lastError: null,
+      });
     };
 
     const disconnectedHandler = () => {
       console.warn(`XY gateway: disconnected`);
-      opts.setStatus?.({ connected: false });
+      opts.setStatus?.({
+        connected: false,
+        statusState: "disconnected",
+        lastDisconnect: { at: Date.now() },
+      });
     };
 
     const errorHandler = (err: Error) => {
       error(`XY gateway: error: ${String(err)}`);
+      opts.setStatus?.({
+        lastError: err.message,
+        lastEventAt: Date.now(),
+      });
     };
 
     const cleanup = () => {
-      log("XY gateway: cleaning up...");
-
-      // Stop health check interval
-      if (healthCheckInterval) {
-        clearInterval(healthCheckInterval);
-        healthCheckInterval = null;
-        console.log("⏸️  Stopped periodic health check");
+      if (cleanedUp) {
+        return;
       }
+      cleanedUp = true;
+      log("XY gateway: cleaning up...");
+      opts.abortSignal?.removeEventListener("abort", handleAbort);
 
       // Remove event handlers to prevent duplicate calls on gateway restart
       wsManager.off("message", messageHandler);
@@ -159,6 +178,12 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
       removeXYWebSocketManager(account);
 
       activeMessages.clear();
+      opts.setStatus?.({
+        connected: false,
+        running: false,
+        statusState: "stopped",
+        lastStopAt: Date.now(),
+      });
       log(`[MONITOR-HANDLER] 🧹 Cleanup complete, cleared active messages`);
     };
 
@@ -182,19 +207,12 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
     wsManager.on("connected", connectedHandler);
     wsManager.on("disconnected", disconnectedHandler);
     wsManager.on("error", errorHandler);
-
-    // Start periodic health check (every 5 minutes)
-    console.log("🏥 Starting periodic health check (every 5 minutes)...");
-    healthCheckInterval = setInterval(() => {
-      console.log("🏥 [HEALTH CHECK] Periodic WebSocket diagnostics...");
-      // diagnoseAllManagers();
-
-      // // Auto-cleanup orphan connections
-      // const cleaned = cleanupOrphanConnections();
-      // if (cleaned > 0) {
-      //   console.log(`🧹 [HEALTH CHECK] Auto-cleaned ${cleaned} manager(s) with orphan connections`);
-      // }
-    }, 5 * 60 * 1000); // 5 minutes
+    opts.setStatus?.({
+      running: true,
+      connected: false,
+      statusState: "starting",
+      lastStartAt: Date.now(),
+    });
 
     // Connect to WebSocket servers
     wsManager.connect()
@@ -202,10 +220,13 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
         log("XY gateway: started successfully");
       })
       .catch((err) => {
-        // Connection failed but don't reject - continue monitoring for reconnection
         error(`XY gateway: initial connection failed: ${String(err)}`);
-        // Still resolve successfully so plugin starts
-        resolve();
+        opts.setStatus?.({
+          connected: false,
+          statusState: "reconnecting",
+          lastError: String(err),
+          lastEventAt: Date.now(),
+        });
       });
   });
 }

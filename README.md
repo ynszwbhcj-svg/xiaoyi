@@ -1,207 +1,107 @@
-# @ynhcj/xiaoyichannel
+# @ynhcj/xiaoyi
 
-XiaoYi channel plugin for OpenClaw with A2A protocol support.
+小艺开放平台的 OpenClaw Channel 插件。插件通过 WebSocket 接入小艺 A2A 消息流，将用户消息路由给 OpenClaw Agent，并把流式回复返回给小艺。
 
-## Features
+## 兼容版本
 
-- WebSocket-based connection to XiaoYi servers
-- AK/SK authentication mechanism
-- A2A (Agent-to-Agent) message protocol support
-- Automatic reconnection with exponential backoff
-- Heartbeat mechanism for connection health monitoring
-- Full integration with OpenClaw's message routing and session management
+- OpenClaw：`>=2026.7.1 <2026.8.0`
+- npm 发布版适配基线：`openclaw@2026.7.1-2`
+- Node.js：`>=22.22.3 <23`、`>=24.15.0 <25` 或 `>=25.9.0`
 
-## Installation
+## 功能
 
-Install the plugin in your OpenClaw project:
+- AK/SK 鉴权
+- A2A JSON-RPC 消息收发
+- 流式回复和任务状态更新
+- WebSocket 心跳、断线重连和连接状态上报
+- 文件消息下载和媒体上下文
+- 清空上下文与取消任务
+- OpenClaw 2026.7 Plugin SDK 的 Channel 入口和配置向导
+
+## 安装
 
 ```bash
-openclaw plugins install @ynhcj/xiaoyichannel@1.0.0
+openclaw plugins install @ynhcj/xiaoyi@latest
 ```
 
-## Configuration
+## 配置
 
-After installation, add the XiaoYi channel configuration to your `openclaw.json` (or `.openclawd.json`):
+先在小艺开放平台获取 AK、SK 和 Agent ID，然后在 `openclaw.json` 中添加：
 
 ```json
 {
   "channels": {
     "xiaoyi": {
       "enabled": true,
-      "accounts": {
-        "default": {
-          "enabled": true,
-          "wsUrl": "wss://hag.com/ws/link",
-          "ak": "your-access-key",
-          "sk": "your-secret-key",
-          "agentId": "your-agent-id"
-        }
-      }
-    }
-  },
-  "agents": {
-    "bindings": [
-      {
-        "agentId": "main",
-        "match": {
-          "channel": "xiaoyi",
-          "accountId": "default"
-        }
-      }
-    ]
-  }
-}
-```
-
-### Configuration Parameters
-
-- `wsUrl`: WebSocket server URL (e.g., `wss://hag.com/ws/link`)
-- `ak`: Access Key for authentication
-- `sk`: Secret Key for authentication
-- `agentId`: Your agent identifier
-
-### Multiple Accounts
-
-You can configure multiple XiaoYi accounts:
-
-```json
-{
-  "channels": {
-    "xiaoyi": {
-      "enabled": true,
-      "accounts": {
-        "account1": {
-          "enabled": true,
-          "wsUrl": "wss://hag.com/ws/link",
-          "ak": "ak1",
-          "sk": "sk1",
-          "agentId": "agent1"
-        },
-        "account2": {
-          "enabled": true,
-          "wsUrl": "wss://hag.com/ws/link",
-          "ak": "ak2",
-          "sk": "sk2",
-          "agentId": "agent2"
-        }
-      }
+      "ak": "小艺开放平台凭证 AK",
+      "sk": "小艺开放平台凭证 SK",
+      "agentId": "小艺开放平台 Agent ID"
     }
   }
 }
 ```
 
-## A2A Protocol
+`wsUrl1` 是可选配置。未设置时使用：
 
-This plugin implements the A2A (Agent-to-Agent) message protocol as specified in the [Huawei Message Stream documentation](https://developer.huawei.com/consumer/cn/doc/service/message-stream-0000002505761434).
-
-### Message Structure
-
-**Incoming Request Message:**
-```json
-{
-  "sessionId": "session-123",
-  "messageId": "msg-456",
-  "timestamp": 1234567890,
-  "sender": {
-    "id": "user-id",
-    "name": "User Name",
-    "type": "user"
-  },
-  "content": {
-    "type": "text",
-    "text": "Hello, agent!"
-  }
-}
+```text
+wss://hag.cloud.huawei.com/openclaw/v1/ws/link
 ```
 
-**Outgoing Response Message:**
-```json
-{
-  "sessionId": "session-123",
-  "messageId": "msg-789",
-  "timestamp": 1234567891,
-  "agentId": "your-agent-id",
-  "sender": {
-    "id": "your-agent-id",
-    "name": "OpenClaw Agent",
-    "type": "agent"
-  },
-  "content": {
-    "type": "text",
-    "text": "Hello! How can I help you?"
-  },
-  "status": "success"
-}
-```
-
-## Authentication
-
-The plugin uses AK/SK authentication as specified in the [Huawei Push Message documentation](https://developer.huawei.com/consumer/cn/doc/service/pushmessage-0000002505761436).
-
-The authentication signature is generated using HMAC-SHA256:
-
-```
-signature = HMAC-SHA256(SK, "ak={AK}&timestamp={TIMESTAMP}")
-```
-
-## Connection Management
-
-The plugin automatically manages WebSocket connections with the following features:
-
-- **Automatic Reconnection**: Reconnects automatically on connection loss with exponential backoff
-- **Heartbeat Monitoring**: Sends ping messages every 30 seconds to keep the connection alive
-- **Connection Health**: Monitors connection status and reports health via OpenClaw's status system
-- **Max Retry Limit**: Stops reconnection attempts after 10 failed attempts
-
-## Session Management
-
-The plugin integrates with OpenClaw's session management system:
-
-- Sessions are scoped by `sessionId` from incoming A2A messages
-- Each conversation maintains its own session context
-- Session keys are automatically generated based on OpenClaw's configuration
-
-## Usage
-
-Once configured, the plugin will:
-
-1. Automatically connect to the XiaoYi WebSocket server on startup
-2. Authenticate using the provided AK/SK credentials
-3. Receive incoming messages via WebSocket
-4. Route messages to the appropriate OpenClaw agent
-5. Send agent responses back through the WebSocket connection
-
-## Troubleshooting
-
-### Connection Issues
-
-Check the OpenClaw logs for connection status:
+修改配置后重启网关：
 
 ```bash
-openclaw logs
+openclaw gateway restart
 ```
 
-### Authentication Failures
+可通过以下命令检查插件和 Channel 状态：
 
-Verify your AK/SK credentials are correct and have the necessary permissions.
+```bash
+openclaw plugins inspect xiaoyi --runtime
+openclaw channels status --channel xiaoyi
+```
 
-### Message Delivery
+## 可选配置
 
-Ensure your `agentId` is correctly configured and matches your XiaoYi account settings.
+| 配置项 | 说明 | 默认值 |
+| --- | --- | --- |
+| `wsUrl1` | 小艺 WebSocket 服务地址 | 小艺开放平台默认地址 |
+| `enableStreaming` | 是否启用流式回复 | `true` |
+| `apiId` | 推送通知 API ID | 无 |
+| `pushId` | 推送通知 Push ID | 无 |
+| `taskTimeoutMs` | 任务超时时间（毫秒） | `3600000` |
+| `sessionCleanupTimeoutMs` | 会话延迟清理时间（毫秒） | `3600000` |
 
-## Development
+当前实现为单账号模式，OpenClaw 账号 ID 固定为 `default`。
 
-To build the plugin from source:
+## 本地开发
 
 ```bash
 npm install
-npm run build
+npm test
+npm pack --dry-run
 ```
+
+本地联调可以使用链接安装：
+
+```bash
+npm run build
+openclaw plugins install -l .
+openclaw gateway restart
+```
+
+如果已经安装过 npm 发布版，请改用本地目录覆盖安装：
+
+```bash
+openclaw plugins install . --force
+openclaw gateway restart
+```
+
+## 协议
+
+- A2A 消息流：小艺开放平台消息流协议
+- 鉴权：使用 AK、SK 和时间戳生成签名
+- 传输：WebSocket
 
 ## License
 
 MIT
-
-## Support
-
-For issues and questions, please visit the [GitHub repository](https://github.com/ynhcj/xiaoyichannel).

@@ -1,6 +1,6 @@
 {
   "name": "@ynhcj/xiaoyi",
-  "version": "2.5.6",
+  "version": "2.6.0",
   "description": "XiaoYi channel plugin for OpenClaw",
   "type": "module",
   "main": "./dist/index.js",
@@ -13,13 +13,13 @@
   },
   "files": [
     "dist",
-    "xiaoyi.js",
     "openclaw.plugin.json",
     "README.md"
   ],
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "keywords": [
@@ -41,7 +41,14 @@
     "install": {
       "npmSpec": "@ynhcj/xiaoyi@latest",
       "localPath": ".",
-      "defaultChoice": "npm"
+      "defaultChoice": "npm",
+      "minHostVersion": ">=2026.7.1"
+    },
+    "compat": {
+      "pluginApi": ">=2026.7.1"
+    },
+    "build": {
+      "openclawVersion": "2026.7.1"
     },
     "channel": {
       "id": "xiaoyi",
@@ -57,7 +64,7 @@
     }
   },
   "peerDependencies": {
-    "openclaw": ">=2026.6.6"
+    "openclaw": ">=2026.7.1 <2026.8.0"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -68,7 +75,6 @@
     "node-fetch": "^3.3.2",
     "uuid": "^13.0.0",
     "ws": "^8.16.0",
-    "openclaw": "2026.6.6",
     "zod": "^3.22.4"
   },
   "devDependencies": {
@@ -76,6 +82,10 @@
     "@types/node-fetch": "^2.6.13",
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.5.10",
+    "openclaw": "2026.7.1-2",
     "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0"
   }
 }

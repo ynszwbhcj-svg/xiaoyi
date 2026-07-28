@@ -1,11 +1,11 @@
 // Configuration parsing and validation for XiaoYi channel
-import type { ClawdbotConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
 import type { XiaoYiChannelConfig } from "./types.js";
 
 /**
  * Resolve XiaoYi channel configuration from OpenClaw config.
  */
-export function resolveXYConfig(cfg: ClawdbotConfig): XiaoYiChannelConfig {
+export function resolveXYConfig(cfg: OpenClawConfig): XiaoYiChannelConfig {
   const channelConfig = cfg?.channels?.xiaoyi as XiaoYiChannelConfig;
 
   if (!channelConfig) {
@@ -19,7 +19,7 @@ export function resolveXYConfig(cfg: ClawdbotConfig): XiaoYiChannelConfig {
  * List XiaoYi channel account IDs.
  * Single account mode - always returns ["default"].
  */
-export function listXYAccountIds(cfg: ClawdbotConfig): string[] {
+export function listXYAccountIds(cfg: OpenClawConfig): string[] {
   const channelConfig = cfg?.channels?.xiaoyi as XiaoYiChannelConfig;
 
   if (!channelConfig || !channelConfig.enabled) {
@@ -33,7 +33,7 @@ export function listXYAccountIds(cfg: ClawdbotConfig): string[] {
  * Get default XiaoYi channel account ID.
  * Single account mode - always returns "default".
  */
-export function getDefaultXYAccountId(cfg: ClawdbotConfig): string | undefined {
+export function getDefaultXYAccountId(cfg: OpenClawConfig): string | undefined {
   const channelConfig = cfg?.channels?.xiaoyi as XiaoYiChannelConfig;
 
   if (!channelConfig || !channelConfig.enabled) {

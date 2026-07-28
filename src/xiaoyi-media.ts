@@ -3,9 +3,7 @@
  * Similar to clawdbot-feishu's media.ts approach
  */
 
-// Use 'any' for PluginRuntime to avoid type compatibility issues
-// The actual type comes from OpenClaw's plugin-sdk
-type PluginRuntime = any;
+import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 
 export interface DownloadedMedia {
   path: string;

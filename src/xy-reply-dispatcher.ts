@@ -1,13 +1,17 @@
-// Reply dispatcher - adapted for openclaw 6.6 with streaming improvements
-import type { ClawdbotConfig, RuntimeEnv, ReplyPayload } from "openclaw/plugin-sdk";
+// Reply dispatcher - adapted for OpenClaw 2026.7 with streaming improvements
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
+import type { ReplyPayload } from "openclaw/plugin-sdk/reply-payload";
+import type { GetReplyOptions } from "openclaw/plugin-sdk/reply-runtime";
+import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
+import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 import { getXYRuntime } from "./runtime.js";
 
-import { sendA2AResponse, sendStatusUpdate, sendReasoningTextUpdate } from "./xy-formatter.js";
+import { sendA2AResponse, sendStatusUpdate } from "./xy-formatter.js";
 import { resolveXYConfig } from "./xy-config.js";
 import type { XiaoYiChannelConfig } from "./types.js";
 
 export interface CreateXYReplyDispatcherParams {
-  cfg: ClawdbotConfig;
+  cfg: OpenClawConfig;
   runtime: RuntimeEnv;
   sessionId: string;
   taskId: string;
@@ -15,22 +19,34 @@ export interface CreateXYReplyDispatcherParams {
   accountId: string;
 }
 
+type ReplyDispatcherWithTypingResult = ReturnType<
+  PluginRuntime["channel"]["reply"]["createReplyDispatcherWithTyping"]
+>;
+
+export type XYReplyDispatcher = Omit<ReplyDispatcherWithTypingResult, "replyOptions"> & {
+  replyOptions: GetReplyOptions;
+  startStatusInterval: () => void;
+  stopStatusInterval: () => void;
+};
+
 /**
  * Create a reply dispatcher for XY channel messages.
- * Ported streaming improvements from xy_channel for openclaw 6.6:
+ * Ported streaming improvements from xy_channel:
  * - processingLock: serialized promise chain to prevent concurrent WebSocket sends
  * - Model-call boundary detection via prevModelText/currentModelText
  * - finalReplyText capture from deliver(kind: "final") for authoritative final frame
  */
-export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): any {
+export function createXYReplyDispatcher(
+  params: CreateXYReplyDispatcherParams,
+): XYReplyDispatcher {
   const { cfg, runtime, sessionId, taskId, messageId, accountId } = params;
   const log = runtime?.log ?? console.log;
   const error = runtime?.error ?? console.error;
 
   log(`[DISPATCHER-CREATE] Creating dispatcher for session=${sessionId}, taskId=${taskId}`);
 
-  // Get OpenClaw PluginRuntime via runtime store (openclaw 6.6 pattern)
-  const core = getXYRuntime() as any;
+  // Get OpenClaw PluginRuntime via the 2026.7 runtime store.
+  const core = getXYRuntime();
 
   // Resolve configuration
   const config: XiaoYiChannelConfig = resolveXYConfig(cfg);
@@ -75,7 +91,7 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
     }
   };
 
-  const { dispatcher, replyOptions, markDispatchIdle } =
+  const { dispatcher, replyOptions, markDispatchIdle, markRunComplete } =
     core.channel.reply.createReplyDispatcherWithTyping({
       responsePrefix: prefixContext.responsePrefix,
       responsePrefixContextProvider: prefixContext.responsePrefixContextProvider,
@@ -327,6 +343,7 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
       },
     },
     markDispatchIdle,
+    markRunComplete,
     startStatusInterval,
     stopStatusInterval,
   };

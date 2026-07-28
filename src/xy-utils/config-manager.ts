@@ -21,9 +21,6 @@ class ConfigManager {
     const previous = this.sessionPushIds.get(sessionId);
     if (previous !== pushId) {
       logger.log(`[ConfigManager] ✨ Updated pushId for session ${sessionId}`);
-      logger.log(`[ConfigManager]   - Previous: ${previous ? previous.substring(0, 20) + '...' : 'none'}`);
-      logger.log(`[ConfigManager]   - New:      ${pushId.substring(0, 20)}...`);
-      logger.log(`[ConfigManager]   - Full new pushId: ${pushId}`);
       this.sessionPushIds.set(sessionId, pushId);
       this.globalPushId = pushId; // Also update global for backward compatibility
     }
