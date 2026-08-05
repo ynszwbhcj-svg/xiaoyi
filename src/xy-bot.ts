@@ -231,7 +231,7 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
       markRunComplete();
       markDispatchIdle();
       stopStatusInterval();
-      unregisterSession(route.sessionKey);
+      unregisterSession(route.sessionKey, parsed.messageId);
     }
 
     log(`[BOT] ✅ Dispatcher completed for session: ${parsed.sessionId}`);
@@ -261,7 +261,7 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
         });
 
         log(`[BOT]   - Unregistering session: ${route.sessionKey}`);
-        unregisterSession(route.sessionKey);
+        unregisterSession(route.sessionKey, message.id);
         log(`[BOT] ✅ Session unregistered after error`);
       }
     } catch (cleanupErr) {

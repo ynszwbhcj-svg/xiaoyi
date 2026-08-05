@@ -1,6 +1,6 @@
 {
   "name": "@ynhcj/xiaoyi",
-  "version": "2.6.0",
+  "version": "2.6.1",
   "description": "XiaoYi channel plugin for OpenClaw",
   "type": "module",
   "main": "./dist/index.js",
@@ -42,13 +42,13 @@
       "npmSpec": "@ynhcj/xiaoyi@latest",
       "localPath": ".",
       "defaultChoice": "npm",
-      "minHostVersion": ">=2026.7.1"
+      "minHostVersion": ">=2026.6.6"
     },
     "compat": {
-      "pluginApi": ">=2026.7.1"
+      "pluginApi": ">=2026.6.6"
     },
     "build": {
-      "openclawVersion": "2026.7.1"
+      "openclawVersion": "2026.6.6"
     },
     "channel": {
       "id": "xiaoyi",
@@ -64,7 +64,7 @@
     }
   },
   "peerDependencies": {
-    "openclaw": ">=2026.7.1 <2026.8.0"
+    "openclaw": ">=2026.6.6 <2026.8.0"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -80,7 +80,7 @@
     "@types/node": "^20.11.0",
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.5.10",
-    "openclaw": "2026.7.1-2",
+    "openclaw": "2026.6.6",
     "typescript": "^5.9.2"
   },
   "engines": {

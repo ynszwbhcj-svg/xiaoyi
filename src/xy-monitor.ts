@@ -6,6 +6,7 @@ import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { resolveXYConfig } from "./xy-config.js";
 import { getXYWebSocketManager, removeXYWebSocketManager } from "./xy-client.js";
 import { handleXYMessage } from "./xy-bot.js";
+import { createXYMessageRunner } from "./xy-message-runner.js";
 import type { A2AJsonRpcRequest } from "./types.js";
 
 export type MonitorXYOpts = {
@@ -15,26 +16,6 @@ export type MonitorXYOpts = {
   accountId?: string;
   setStatus?: (status: Omit<ChannelAccountSnapshot, "accountId">) => void;
 };
-
-/**
- * Per-session serial queue that ensures messages from the same session are processed
- * in arrival order while allowing different sessions to run concurrently.
- * Following feishu/monitor.account.ts pattern.
- */
-function createSessionQueue() {
-  const queues = new Map<string, Promise<void>>();
-  return (sessionId: string, task: () => Promise<void>): Promise<void> => {
-    const prev = queues.get(sessionId) ?? Promise.resolve();
-    const next = prev.then(task, task);
-    queues.set(sessionId, next);
-    void next.finally(() => {
-      if (queues.get(sessionId) === next) {
-        queues.delete(sessionId);
-      }
-    });
-    return next;
-  };
-}
 
 /**
  * Monitor XY channel WebSocket connections.
@@ -74,11 +55,11 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
   // This ensures OpenClaw's health-monitor sees activity and doesn't trigger stale-socket restarts
   wsManager.setHealthEventCallback(trackTransportActivity);
 
-  // Track active message processing to detect duplicates
-  const activeMessages = new Set<string>();
-
-  // Create session queue for ordered message processing
-  const enqueue = createSessionQueue();
+  // Distinct messages must reach OpenClaw immediately. The host owns the
+  // per-session lane and uses it to inject steer messages into active runs.
+  const messageRunner = createXYMessageRunner((err) => {
+    error(`XY gateway: error handling message: ${String(err)}`);
+  });
 
   return new Promise<void>((resolve) => {
     let cleanedUp = false;
@@ -98,34 +79,23 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
         lastMessageAt: now,
       });
 
-      if (activeMessages.has(messageKey)) {
+      const started = messageRunner.run(messageKey, async () => {
+        log(`[MONITOR-HANDLER] Starting handleXYMessage for messageKey=${messageKey}`);
+        await handleXYMessage({
+          cfg,
+          runtime,
+          message,
+          accountId,
+        });
+        log(`[MONITOR-HANDLER] Completed handleXYMessage for messageKey=${messageKey}`);
+      });
+
+      if (!started) {
         error(`[MONITOR-HANDLER] Duplicate message detected! messageKey=${messageKey}`);
         return;
       }
 
-      activeMessages.add(messageKey);
-      log(`[MONITOR-HANDLER] Active messages count: ${activeMessages.size}, messageKey: ${messageKey}`);
-
-      const task = async () => {
-        try {
-          log(`[MONITOR-HANDLER] Starting handleXYMessage for messageKey=${messageKey}`);
-          await handleXYMessage({
-            cfg,
-            runtime,
-            message,
-            accountId,
-          });
-          log(`[MONITOR-HANDLER] Completed handleXYMessage for messageKey=${messageKey}`);
-        } catch (err) {
-          error(`XY gateway: error handling message: ${String(err)}`);
-        } finally {
-          activeMessages.delete(messageKey);
-        }
-      };
-      void enqueue(sessionId, task).catch((err) => {
-        error(`XY gateway: queue processing failed for session ${sessionId}: ${String(err)}`);
-        activeMessages.delete(messageKey);
-      });
+      log(`[MONITOR-HANDLER] Active messages count: ${messageRunner.size()}, messageKey: ${messageKey}`);
     };
 
     const connectedHandler = () => {
@@ -177,7 +147,7 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
       // removeXYWebSocketManager internally calls manager.disconnect()
       removeXYWebSocketManager(account);
 
-      activeMessages.clear();
+      messageRunner.clear();
       opts.setStatus?.({
         connected: false,
         running: false,
