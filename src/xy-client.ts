@@ -2,7 +2,7 @@
 // Adapted for xiaoyi - uses xiaoyi's WebSocket manager with aksk auth
 import { XiaoYiWebSocketManager } from "./websocket.js";
 import type { XiaoYiChannelConfig } from "./types.js";
-import type { RuntimeEnv } from "openclaw/plugin-sdk";
+import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 
 // Runtime reference for logging
 let runtime: RuntimeEnv | undefined;
@@ -31,13 +31,13 @@ export function getXYWebSocketManager(config: XiaoYiChannelConfig): XiaoYiWebSoc
 
   if (cached) {
     const log = runtime?.log ?? console.log;
-    log(`[WS-MANAGER-CACHE] ✅ Reusing cached WebSocket manager: ${cacheKey}, total managers: ${wsManagerCache.size}`);
+    log(`[WS-MANAGER-CACHE] Reusing manager for agent ${config.agentId}, total managers: ${wsManagerCache.size}`);
     return cached;
   }
 
   // Create new manager with xiaoyi's config (aksk auth)
   const log = runtime?.log ?? console.log;
-  log(`[WS-MANAGER-CACHE] 🆕 Creating new WebSocket manager: ${cacheKey}, total managers before: ${wsManagerCache.size}`);
+  log(`[WS-MANAGER-CACHE] Creating manager for agent ${config.agentId}, total managers before: ${wsManagerCache.size}`);
   cached = new XiaoYiWebSocketManager(config);
   wsManagerCache.set(cacheKey, cached);
   log(`[WS-MANAGER-CACHE] 📊 Total managers after creation: ${wsManagerCache.size}`);
@@ -54,12 +54,12 @@ export function removeXYWebSocketManager(config: XiaoYiChannelConfig): void {
   const manager = wsManagerCache.get(cacheKey);
 
   if (manager) {
-    console.log(`🗑️  [WS-MANAGER-CACHE] Removing manager from cache: ${cacheKey}`);
+    console.log(`[WS-MANAGER-CACHE] Removing manager for agent ${config.agentId}`);
     manager.disconnect();
     wsManagerCache.delete(cacheKey);
-    console.log(`🗑️  [WS-MANAGER-CACHE] Manager removed, remaining managers: ${wsManagerCache.size}`);
+    console.log(`[WS-MANAGER-CACHE] Manager removed, remaining managers: ${wsManagerCache.size}`);
   } else {
-    console.log(`⚠️  [WS-MANAGER-CACHE] Manager not found in cache: ${cacheKey}`);
+    console.log(`[WS-MANAGER-CACHE] Manager not found for agent ${config.agentId}`);
   }
 }
 

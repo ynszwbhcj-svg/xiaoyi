@@ -1,5 +1,6 @@
 // Message dispatch engine - following feishu/bot.ts pattern (simplified)
-import type { ClawdbotConfig, RuntimeEnv, ReplyPayload } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
+import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { getXYRuntime } from "./runtime.js";
 import { createXYReplyDispatcher } from "./xy-reply-dispatcher.js";
 import { parseA2AMessage, extractTextFromParts, extractFileParts, extractPushId, isClearContextMessage, isTasksCancelMessage } from "./xy-parser.js";
@@ -8,13 +9,13 @@ import { resolveXYConfig } from "./xy-config.js";
 import { sendStatusUpdate, sendClearContextResponse, sendTasksCancelResponse } from "./xy-formatter.js";
 import { registerSession, unregisterSession } from "./xy-tools/session-manager.js";
 import { configManager } from "./xy-utils/config-manager.js";
-import type { A2AJsonRpcRequest } from "./types.js";
+import { XIAOYI_CHANNEL_ID, type A2AJsonRpcRequest } from "./types.js";
 
 /**
  * Parameters for handling an XY message.
  */
 export interface HandleXYMessageParams {
-  cfg: ClawdbotConfig;
+  cfg: OpenClawConfig;
   runtime: RuntimeEnv;
   message: A2AJsonRpcRequest;
   accountId: string;
@@ -31,14 +32,12 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
   const error = runtime?.error ?? console.error;
 
   // Get OpenClaw PluginRuntime via new runtime store
-  const core = getXYRuntime() as any;
+  const core = getXYRuntime();
 
   try {
     // Check for special messages BEFORE parsing (these have different param structures)
     const messageMethod = message.method;
     log(`[BOT-ENTRY] <<<<<<< Received message with method: ${messageMethod}, id: ${message.id} >>>>>>>`);
-    log(`[BOT-ENTRY] Stack trace for debugging:`, new Error().stack?.split('\n').slice(1, 4).join('\n'));
-
 
     // Handle clearContext messages (params only has sessionId)
     if (messageMethod === "clearContext" || messageMethod === "clear_context") {
@@ -82,8 +81,6 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
     if (pushId) {
       log(`[BOT] 📌 Extracted push_id from user message`);
       log(`[BOT]   - Session ID: ${parsed.sessionId}`);
-      log(`[BOT]   - Push ID preview: ${pushId.substring(0, 20)}...`);
-      log(`[BOT]   - Full push_id: ${pushId}`);
       configManager.updatePushId(parsed.sessionId, pushId);
     } else {
       log(`[BOT] ℹ️  No push_id found in message, will use config default`);
@@ -95,9 +92,9 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
     // ✅ Resolve agent route (following feishu pattern)
     // accountId is "default" for XY (single account mode)
     // Use sessionId as peer.id to ensure all messages in the same session share context
-    let route = core.channel.routing.resolveAgentRoute({
+    const route = core.channel.routing.resolveAgentRoute({
       cfg,
-      channel: "xiaoyi-channel",
+      channel: XIAOYI_CHANNEL_ID,
       accountId,  // "default"
       peer: {
         kind: "direct" as const,
@@ -118,7 +115,7 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
       sessionId: parsed.sessionId,
       taskId: parsed.taskId,
       messageId: parsed.messageId,
-      agentId: route.accountId,
+      agentId: route.agentId,
     });
 
     log(`[BOT] ✅ Session registered for tools`);
@@ -158,7 +155,7 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
 
     // Format agent envelope (following feishu pattern)
     const body = core.channel.reply.formatAgentEnvelope({
-      channel: "xiaoyi-channel",
+      channel: XIAOYI_CHANNEL_ID,
       from: speaker,
       timestamp: new Date(),
       envelope: envelopeOptions,
@@ -179,34 +176,28 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
       GroupSubject: undefined,
       SenderName: parsed.sessionId,
       SenderId: parsed.sessionId,
-      Provider: "xiaoyi-channel" as const,
-      Surface: "xiaoyi-channel" as const,
+      Provider: XIAOYI_CHANNEL_ID,
+      Surface: XIAOYI_CHANNEL_ID,
       MessageSid: parsed.messageId,
       Timestamp: Date.now(),
       WasMentioned: false,
       CommandAuthorized: true,
-      OriginatingChannel: "xiaoyi-channel" as const,
+      OriginatingChannel: XIAOYI_CHANNEL_ID,
       OriginatingTo: parsed.sessionId,  // Original message target
       ReplyToBody: undefined, // A2A protocol doesn't support reply/quote
       ...mediaPayload,
     });
 
-    // Send initial status update immediately after parsing message
-    log(`[STATUS] Sending initial status update for session ${parsed.sessionId}`);
-    void sendStatusUpdate({
-      config,
-      sessionId: parsed.sessionId,
-      taskId: parsed.taskId,
-      messageId: parsed.messageId,
-      text: "任务正在处理中，请稍后~",
-      state: "working",
-    }).catch((err) => {
-      error(`Failed to send initial status update:`, err);
-    });
-
     // Create reply dispatcher (following feishu pattern)
     log(`[BOT-DISPATCHER] 🎯 Creating reply dispatcher for session=${parsed.sessionId}, taskId=${parsed.taskId}, messageId=${parsed.messageId}`);
-    const { dispatcher, replyOptions, markDispatchIdle, startStatusInterval } = createXYReplyDispatcher({
+    const {
+      dispatcher,
+      replyOptions,
+      markDispatchIdle,
+      markRunComplete,
+      startStatusInterval,
+      stopStatusInterval,
+    } = createXYReplyDispatcher({
       cfg,
       runtime,
       sessionId: parsed.sessionId,
@@ -225,26 +216,23 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
     // Dispatch to OpenClaw core using correct API (following feishu pattern)
     log(`[BOT] 🚀 Starting dispatcher with session: ${route.sessionKey}`);
 
-    await core.channel.reply.withReplyDispatcher({
-      dispatcher,
-      onSettled: () => {
-        log(`[BOT] 🏁 onSettled called for session: ${route.sessionKey}`);
-        log(`[BOT]   - About to unregister session...`);
-
-        markDispatchIdle();
-        // Unregister session context when done
-        unregisterSession(route.sessionKey);
-
-        log(`[BOT] ✅ Session unregistered in onSettled`);
-      },
-      run: () =>
-        core.channel.reply.dispatchReplyFromConfig({
-          ctx: ctxPayload,
-          cfg,
-          dispatcher,
-          replyOptions,
-        }),
-    });
+    try {
+      await core.channel.reply.withReplyDispatcher({
+        dispatcher,
+        run: () =>
+          core.channel.reply.dispatchReplyFromConfig({
+            ctx: ctxPayload,
+            cfg,
+            dispatcher,
+            replyOptions,
+          }),
+      });
+    } finally {
+      markRunComplete();
+      markDispatchIdle();
+      stopStatusInterval();
+      unregisterSession(route.sessionKey, parsed.messageId);
+    }
 
     log(`[BOT] ✅ Dispatcher completed for session: ${parsed.sessionId}`);
     log(`xy: dispatch complete (session=${parsed.sessionId})`);
@@ -257,15 +245,14 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
 
     // Try to unregister session on error (if route was established)
     try {
-      const core = getXYRuntime() as any;
-      const params = message.params as any;
-      const sessionId = params?.sessionId;
+      const core = getXYRuntime();
+      const sessionId = message.params?.sessionId;
       if (sessionId) {
         log(`[BOT] 🧹 Cleaning up session after error: ${sessionId}`);
 
         const route = core.channel.routing.resolveAgentRoute({
           cfg,
-          channel: "xiaoyi-channel",
+          channel: XIAOYI_CHANNEL_ID,
           accountId,
           peer: {
             kind: "direct" as const,
@@ -274,7 +261,7 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
         });
 
         log(`[BOT]   - Unregistering session: ${route.sessionKey}`);
-        unregisterSession(route.sessionKey);
+        unregisterSession(route.sessionKey, message.id);
         log(`[BOT] ✅ Session unregistered after error`);
       }
     } catch (cleanupErr) {

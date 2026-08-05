@@ -270,6 +270,7 @@ export interface XiaoYiChannelConfig {
   // Push notification configuration (optional)
   apiId?: string;          // API ID, for push messages (optional)
   pushId?: string;         // Push ID, for push messages (optional)
+  defaultSessionId?: string; // Default session target for scheduled push delivery
   taskTimeoutMs?: number;  // Task timeout in milliseconds, default 3600000 (1 hour)
 
   /**
@@ -333,3 +334,4 @@ export interface SessionBinding {
   sessionId: string;
   boundAt: number;
 }
+export const XIAOYI_CHANNEL_ID = "xiaoyi" as const;

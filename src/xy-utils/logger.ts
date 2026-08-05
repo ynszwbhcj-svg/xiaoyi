@@ -1,40 +1,39 @@
 // Logging utilities for XY channel
-import { getXiaoYiRuntime } from "../runtime.js";
+import { getXYRuntime } from "../runtime.js";
 
-type LogLevel = "log" | "warn" | "error";
+type LogLevel = "info" | "warn" | "error" | "debug";
 
 /**
  * Log a message using the OpenClaw runtime logger.
  */
-function logMessage(level: LogLevel, message: string, ...args: any[]): void {
+function logMessage(level: LogLevel, message: string, ...args: unknown[]): void {
   try {
-    const runtime = getXiaoYiRuntime();
-    const logFn = runtime[level];
-    if (logFn) {
-      const formattedMessage = `[XY] ${message}`;
-      logFn(formattedMessage, ...args);
-    }
+    const runtimeLogger = getXYRuntime().logging.getChildLogger({
+      channel: "xiaoyi",
+    });
+    const logFn = runtimeLogger[level] ?? runtimeLogger.info;
+    const meta = args.length > 0 ? { args } : undefined;
+    logFn(`[XY] ${message}`, meta);
   } catch (error) {
-    // Fallback to console if runtime not available
-    console[level](`[XY] ${message}`, ...args);
+    const fallback = level === "info" ? console.log : console[level];
+    fallback(`[XY] ${message}`, ...args);
   }
 }
 
 export const logger = {
-  log(message: string, ...args: any[]): void {
-    logMessage("log", message, ...args);
+  log(message: string, ...args: unknown[]): void {
+    logMessage("info", message, ...args);
   },
 
-  warn(message: string, ...args: any[]): void {
+  warn(message: string, ...args: unknown[]): void {
     logMessage("warn", message, ...args);
   },
 
-  error(message: string, ...args: any[]): void {
+  error(message: string, ...args: unknown[]): void {
     logMessage("error", message, ...args);
   },
 
-  debug(message: string, ...args: any[]): void {
-    // Debug messages go to log level
-    logMessage("log", `[DEBUG] ${message}`, ...args);
+  debug(message: string, ...args: unknown[]): void {
+    logMessage("debug", message, ...args);
   },
 };

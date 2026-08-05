@@ -1,9 +1,82 @@
 {
   "id": "xiaoyi",
+  "name": "XiaoYi",
+  "description": "小艺开放平台 A2A Channel，通过 WebSocket 连接 OpenClaw。",
+  "activation": {
+    "onStartup": false
+  },
   "channels": ["xiaoyi"],
+  "channelConfigs": {
+    "xiaoyi": {
+      "label": "XiaoYi",
+      "description": "小艺开放平台 A2A WebSocket Channel。",
+      "schema": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "wsUrl1": {
+            "type": "string",
+            "format": "uri"
+          },
+          "ak": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sk": {
+            "type": "string",
+            "minLength": 1
+          },
+          "agentId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "enableStreaming": {
+            "type": "boolean"
+          },
+          "apiId": {
+            "type": "string"
+          },
+          "pushId": {
+            "type": "string"
+          },
+          "defaultSessionId": {
+            "type": "string"
+          },
+          "taskTimeoutMs": {
+            "type": "number",
+            "minimum": 1000
+          },
+          "sessionCleanupTimeoutMs": {
+            "type": "number",
+            "minimum": 0
+          }
+        }
+      },
+      "uiHints": {
+        "ak": {
+          "label": "Access Key (AK)",
+          "sensitive": true
+        },
+        "sk": {
+          "label": "Secret Key (SK)",
+          "sensitive": true
+        },
+        "agentId": {
+          "label": "Agent ID"
+        },
+        "wsUrl1": {
+          "label": "WebSocket URL",
+          "placeholder": "wss://hag.cloud.huawei.com/openclaw/v1/ws/link"
+        }
+      }
+    }
+  },
   "configSchema": {
     "type": "object",
-    "additionalProperties": true,
+    "additionalProperties": false,
     "properties": {}
   }
 }

@@ -1,5 +1,5 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { definePluginEntry, type OpenClawPluginDefinition } from "openclaw/plugin-sdk/core";
+import { defineChannelPluginEntry } from "openclaw/plugin-sdk/channel-core";
+import type { OpenClawPluginDefinition } from "openclaw/plugin-sdk/plugin-entry";
 import { xiaoyiPlugin } from "./channel.js";
 import { setXYRuntime } from "./runtime.js";
 
@@ -22,24 +22,12 @@ import { setXYRuntime } from "./runtime.js";
  *   }
  * }
  */
-const plugin: OpenClawPluginDefinition = definePluginEntry({
+const plugin: OpenClawPluginDefinition = defineChannelPluginEntry({
   id: "xiaoyi",
   name: "XiaoYi Channel",
   description: "XiaoYi channel plugin with A2A protocol support",
-  register(api: OpenClawPluginApi) {
-    console.log("XiaoYi: register() called - START");
-
-    // Store runtime for cross-module access
-    setXYRuntime(api.runtime);
-    console.log("XiaoYi: setXYRuntime() completed");
-
-    // Register the channel plugin
-    console.log("XiaoYi: About to call registerChannel()");
-    api.registerChannel({ plugin: xiaoyiPlugin });
-    console.log("XiaoYi: registerChannel() completed");
-
-    console.log("XiaoYi channel plugin registered - END");
-  },
+  plugin: xiaoyiPlugin,
+  setRuntime: setXYRuntime,
 });
 
 export default plugin;

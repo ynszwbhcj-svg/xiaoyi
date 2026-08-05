@@ -1,47 +1,19 @@
 import type {
   ChannelPlugin,
-  ChannelAccountSnapshot,
-} from "openclaw/plugin-sdk";
-import type { ClawdbotConfig } from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/channel-core";
+import { createAccountStatusSink } from "openclaw/plugin-sdk/channel-outbound";
+import type { OutboundDeliveryResult } from "openclaw/plugin-sdk/channel-send-result";
 
-// Local type definition for outbound delivery result
-// (matches openclaw's internal OutboundDeliveryResult type)
-type OutboundDeliveryResult = {
-  channel: string;
-  messageId: string;
-  chatId?: string;
-  channelId?: string;
-  roomId?: string;
-  conversationId?: string;
-  timestamp?: number;
-  meta?: Record<string, unknown>;
-};
-
-import { getXiaoYiRuntime } from "./runtime.js";
-import { xiaoyiOnboardingAdapter } from "./onboarding.js";
 import {
   XiaoYiChannelConfig,
-  A2ARequestMessage,
-  A2AResponseMessage,
+  XIAOYI_CHANNEL_ID,
 } from "./types.js";
-import {
-  extractTextFromUrl,
-  isImageMimeType,
-  isPdfMimeType,
-  isTextMimeType,
-  downloadAndSaveMediaList,
-  buildXiaoYiMediaPayload,
-} from "./xiaoyi-media.js";
 import { getLatestSessionContext } from "./xy-tools/session-manager.js";
+import { xiaoyiSetupAdapter, xiaoyiSetupWizard } from "./setup.js";
 
 // Special marker for default push delivery when no target is specified (cron/announce mode)
 const DEFAULT_PUSH_MARKER = "default";
-
-/**
- * Track if message handlers have been registered to prevent duplicate registrations
- * when startAccount() is called multiple times due to auto-restart attempts
- */
-let handlersRegistered = false;
+const DEFAULT_ACCOUNT_ID = "default";
 
 /**
  * Resolved XiaoYi account configuration (single account mode)
@@ -49,6 +21,8 @@ let handlersRegistered = false;
 export interface ResolvedXiaoYiAccount {
   accountId: string;
   config: XiaoYiChannelConfig;
+  enabled: boolean;
+  configured: boolean;
 }
 
 /**
@@ -56,11 +30,11 @@ export interface ResolvedXiaoYiAccount {
  * Implements OpenClaw ChannelPlugin interface for XiaoYi A2A protocol
  * Single account mode only
  */
-export const xiaoyiPlugin = {
-  id: "xiaoyi",
+export const xiaoyiPlugin: ChannelPlugin<ResolvedXiaoYiAccount> = {
+  id: XIAOYI_CHANNEL_ID,
 
   meta: {
-    id: "xiaoyi",
+    id: XIAOYI_CHANNEL_ID,
     label: "XiaoYi",
     selectionLabel: "XiaoYi (小艺)",
     docsPath: "/channels/xiaoyi",
@@ -130,32 +104,27 @@ export const xiaoyiPlugin = {
     },
   },
 
-  onboarding: xiaoyiOnboardingAdapter,
+  setup: xiaoyiSetupAdapter,
+  setupWizard: xiaoyiSetupWizard,
 
   /**
    * Config adapter - single account mode
    */
   config: {
-    listAccountIds: (cfg: ClawdbotConfig) => {
+    listAccountIds: (cfg) => {
       const channelConfig = cfg?.channels?.xiaoyi as XiaoYiChannelConfig;
       if (!channelConfig || !channelConfig.enabled) {
         return [];
       }
-      // Single account mode: always return "default"
-      return ["default"];
+      return [DEFAULT_ACCOUNT_ID];
     },
 
-    resolveAccount: (cfg: ClawdbotConfig, accountId?: string | null) => {
-      // Single account mode: always use "default"
-      const resolvedAccountId = "default";
-
-      // Access channel config from cfg.channels.xiaoyi
+    resolveAccount: (cfg) => {
       const channelConfig = cfg?.channels?.xiaoyi as XiaoYiChannelConfig | undefined;
 
-      // If channel is not configured yet, return empty config
       if (!channelConfig) {
         return {
-          accountId: resolvedAccountId,
+          accountId: DEFAULT_ACCOUNT_ID,
           config: {
             enabled: false,
             wsUrl: "",
@@ -165,61 +134,39 @@ export const xiaoyiPlugin = {
             agentId: "",
           },
           enabled: false,
+          configured: false,
         };
       }
 
+      const configured = Boolean(
+        channelConfig.ak?.trim() &&
+          channelConfig.sk?.trim() &&
+          channelConfig.agentId?.trim(),
+      );
       return {
-        accountId: resolvedAccountId,
+        accountId: DEFAULT_ACCOUNT_ID,
         config: channelConfig,
         enabled: channelConfig.enabled !== false,
+        configured,
       };
     },
 
-    defaultAccountId: (cfg: ClawdbotConfig) => {
-      const channelConfig = cfg?.channels?.xiaoyi as XiaoYiChannelConfig;
-      if (!channelConfig || !channelConfig.enabled) {
-        return undefined;
-      }
-      // Single account mode: always return "default"
-      return "default";
-    },
+    defaultAccountId: () => DEFAULT_ACCOUNT_ID,
 
-    isConfigured: (account: any, cfg: ClawdbotConfig) => {
-      // Safely check if all required fields are present and non-empty
-      if (!account || !account.config) {
-        return false;
-      }
+    isConfigured: (account) => account.configured,
 
-      const config = account.config;
+    isEnabled: (account) => account.enabled,
 
-      // Check each field is a string and has content after trimming
-      // Note: wsUrl1 is optional (default will be used if not provided)
-      const hasAk = typeof config.ak === 'string' && config.ak.trim().length > 0;
-      const hasSk = typeof config.sk === 'string' && config.sk.trim().length > 0;
-      const hasAgentId = typeof config.agentId === 'string' && config.agentId.trim().length > 0;
+    disabledReason: () => "Channel is disabled in configuration",
 
-      return hasAk && hasSk && hasAgentId;
-    },
+    unconfiguredReason: () =>
+      "Missing required configuration: ak, sk, or agentId (wsUrl1 is optional, default will be used)",
 
-    isEnabled: (account: any, cfg: ClawdbotConfig) => {
-      return account?.enabled !== false;
-    },
-
-    disabledReason: (account: any, cfg: ClawdbotConfig) => {
-      return "Channel is disabled in configuration";
-    },
-
-    unconfiguredReason: (account: any, cfg: ClawdbotConfig) => {
-      return "Missing required configuration: ak, sk, or agentId (wsUrl1 is optional, default will be used)";
-    },
-
-    describeAccount: (account: any, cfg: ClawdbotConfig) => ({
+    describeAccount: (account) => ({
       accountId: account.accountId,
-      name: 'XiaoYi',
+      name: "XiaoYi",
       enabled: account.enabled,
-      configured: Boolean(
-        account.config?.ak && account.config?.sk && account.config?.agentId
-      ),
+      configured: account.configured,
     }),
   },
 
@@ -228,29 +175,29 @@ export const xiaoyiPlugin = {
    * Using xy-monitor for message handling (xy_channel architecture)
    */
   gateway: {
-    startAccount: async (ctx: any) => {
-      console.log("XiaoYi: startAccount() called - START");
+    startAccount: async (ctx) => {
       const { monitorXYProvider } = await import("./xy-monitor.js");
       const account = ctx.account;
-      const config = ctx.cfg;
+      const setStatus = createAccountStatusSink({
+        accountId: account.accountId,
+        setStatus: ctx.setStatus,
+      });
 
       console.log(`[xiaoyi] Starting xiaoyi channel with xy_monitor architecture`);
       console.log(`[xiaoyi] Account ID: ${account.accountId}`);
       console.log(`[xiaoyi] Agent ID: ${account.config.agentId}`);
 
       return monitorXYProvider({
-        config: config,
+        config: ctx.cfg,
         runtime: ctx.runtime,
         abortSignal: ctx.abortSignal,
         accountId: account.accountId,
-        setStatus: ctx.setStatus,
+        setStatus,
       });
     },
 
-    stopAccount: async (ctx: any) => {
-      const runtime = getXiaoYiRuntime();
-      runtime.stop();
-    },
+    // The monitor owns transport cleanup and observes the gateway abort signal.
+    stopAccount: async () => {},
   },
 
   /**
@@ -260,7 +207,7 @@ export const xiaoyiPlugin = {
     deliveryMode: "direct" as const,
     textChunkLimit: 4000,
 
-    resolveTarget: ({ cfg, to, accountId, mode }: any) => {
+    resolveTarget: ({ to }) => {
       if (!to || to.trim() === "") {
         console.log(`[xiaoyi.resolveTarget] No target specified, using default push marker`);
         return { ok: true as const, to: DEFAULT_PUSH_MARKER };
@@ -282,8 +229,8 @@ export const xiaoyiPlugin = {
       return { ok: true as const, to: trimmedTo };
     },
 
-    sendText: async (ctx: any): Promise<OutboundDeliveryResult> => {
-      const { cfg, to, text, accountId } = ctx as any;
+    sendText: async (ctx): Promise<OutboundDeliveryResult> => {
+      const { cfg, to, text } = ctx;
 
       console.log(`[xiaoyi.sendText] Called with: to=${to}, textLength=${text?.length || 0}`);
 
@@ -296,7 +243,7 @@ export const xiaoyiPlugin = {
       // Resolve actual target (strip taskId portion if present)
       let actualTo = to;
       if (to === DEFAULT_PUSH_MARKER) {
-        actualTo = (config as any).defaultSessionId || "";
+        actualTo = config.defaultSessionId || "";
       } else if (to.includes("::")) {
         actualTo = to.split("::")[0];
       }
@@ -325,7 +272,7 @@ export const xiaoyiPlugin = {
       };
     },
 
-    sendMedia: async (ctx: any): Promise<OutboundDeliveryResult> => {
+    sendMedia: async (): Promise<OutboundDeliveryResult> => {
       throw new Error("暂不支持文件回传");
     },
   },
@@ -348,58 +295,14 @@ export const xiaoyiPlugin = {
    * Using buildAccountSnapshot for compatibility with new openclaw version
    */
   status: {
-    buildAccountSnapshot: async (params: {
-      account: ResolvedXiaoYiAccount;
-      cfg: ClawdbotConfig;
-      runtime?: any;
-      probe?: unknown;
-      audit?: unknown;
-    }) => {
-      const runtime = getXiaoYiRuntime();
-      const connection = runtime.getConnection();
-
-      if (!connection) {
-        return {
-          accountId: params.account.accountId,
-          state: "offline" as const,
-          lastEventAt: Date.now(),
-          issues: [{
-            severity: "error" as const,
-            message: "Not connected",
-          }],
-        };
-      }
-
-      const state = connection.getState();
-
-      if (state.connected && state.authenticated) {
-        return {
-          accountId: params.account.accountId,
-          state: "ready" as const,
-          lastEventAt: Date.now(),
-          lastInboundAt: Date.now(),
-        };
-      } else if (state.connected) {
-        return {
-          accountId: params.account.accountId,
-          state: "authenticating" as const,
-          lastEventAt: Date.now(),
-          issues: [{
-            severity: "warning" as const,
-            message: "Connected but not authenticated",
-          }],
-        };
-      } else {
-        return {
-          accountId: params.account.accountId,
-          state: "offline" as const,
-          lastEventAt: Date.now(),
-          issues: [{
-            severity: "error" as const,
-            message: `Reconnect attempts: ${state.reconnectAttempts}/${state.maxReconnectAttempts}`,
-          }],
-        };
-      }
+    buildAccountSnapshot: async (params) => {
+      return {
+        ...params.runtime,
+        accountId: params.account.accountId,
+        name: "XiaoYi",
+        enabled: params.account.enabled,
+        configured: params.account.configured,
+      };
     },
   },
 };

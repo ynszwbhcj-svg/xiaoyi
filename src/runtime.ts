@@ -1,9 +1,10 @@
-import type { PluginRuntime } from "openclaw/plugin-sdk/core";
-import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
+import {
+  createPluginRuntimeStore,
+  type PluginRuntime,
+} from "openclaw/plugin-sdk/runtime-store";
 import { XiaoYiWebSocketManager } from "./websocket.js";
 import { XiaoYiChannelConfig } from "./types.js";
 
-// New runtime store for cross-module PluginRuntime access (openclaw 6.6 pattern)
 const { setRuntime: setXYRuntime, getRuntime: getXYRuntime } =
   createPluginRuntimeStore<PluginRuntime>({
     pluginId: "xiaoyi",
@@ -36,7 +37,6 @@ const DEFAULT_TIMEOUT_CONFIG: TimeoutConfig = {
  */
 export class XiaoYiRuntime {
   private connection: XiaoYiWebSocketManager | null = null;
-  private pluginRuntime: any = null; // Store PluginRuntime from OpenClaw
   private config: XiaoYiChannelConfig | null = null;
   private sessionToTaskIdMap: Map<string, string> = new Map(); // Map sessionId to taskId
   private instanceId: string; // Track instance identity
@@ -70,21 +70,6 @@ export class XiaoYiRuntime {
 
   getInstanceId(): string {
     return this.instanceId;
-  }
-
-  /**
-   * Set OpenClaw PluginRuntime (from api.runtime in register())
-   */
-  setPluginRuntime(runtime: any): void {
-    console.log(`XiaoYi: [${this.instanceId}] Setting PluginRuntime`);
-    this.pluginRuntime = runtime;
-  }
-
-  /**
-   * Get OpenClaw PluginRuntime
-   */
-  getPluginRuntime(): any {
-    return this.pluginRuntime;
   }
 
   /**
@@ -496,17 +481,16 @@ export class XiaoYiRuntime {
 const GLOBAL_KEY = '__xiaoyi_runtime_instance__';
 
 export function getXiaoYiRuntime(): XiaoYiRuntime {
-  const g = global as any;
-  if (!g[GLOBAL_KEY]) {
+  const globalState = globalThis as typeof globalThis & {
+    [GLOBAL_KEY]?: XiaoYiRuntime;
+  };
+  if (!globalState[GLOBAL_KEY]) {
     console.log("XiaoYi: Creating NEW runtime instance (global storage)");
-    g[GLOBAL_KEY] = new XiaoYiRuntime();
+    globalState[GLOBAL_KEY] = new XiaoYiRuntime();
   } else {
-    console.log(`XiaoYi: Reusing EXISTING runtime instance: ${g[GLOBAL_KEY].getInstanceId()}`);
+    console.log(
+      `XiaoYi: Reusing EXISTING runtime instance: ${globalState[GLOBAL_KEY].getInstanceId()}`,
+    );
   }
-  return g[GLOBAL_KEY];
-}
-
-export function setXiaoYiRuntime(runtime: any): void {
-  getXiaoYiRuntime().setPluginRuntime(runtime);
-  setXYRuntime(runtime); // Also store in the new runtime store (openclaw 6.6 pattern)
+  return globalState[GLOBAL_KEY];
 }

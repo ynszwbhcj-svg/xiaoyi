@@ -1,8 +1,7 @@
 // OpenClaw → A2A format conversion
 import { v4 as uuidv4 } from "uuid";
 import { getXYWebSocketManager } from "./xy-client.js";
-import { getXiaoYiRuntime } from "./runtime.js";
-import type { RuntimeEnv } from "openclaw/plugin-sdk";
+import { logger } from "./xy-utils/logger.js";
 import type {
   XiaoYiChannelConfig,
   A2AJsonRpcResponse,
@@ -32,9 +31,7 @@ export interface SendA2AResponseParams {
 export async function sendA2AResponse(params: SendA2AResponseParams): Promise<void> {
   const { config, sessionId, taskId, messageId, text, append, final, files } = params;
 
-  const runtime = getXiaoYiRuntime() as any;
-  const log = runtime?.log ?? console.log;
-  const error = runtime?.error ?? console.error;
+  const log = logger.log;
 
   // Build artifact update event
   const artifact: A2ATaskArtifactUpdateEvent = {
@@ -120,9 +117,7 @@ export interface SendReasoningTextUpdateParams {
 export async function sendReasoningTextUpdate(params: SendReasoningTextUpdateParams): Promise<void> {
   const { config, sessionId, taskId, messageId, text, append = true } = params;
 
-  const runtime = getXiaoYiRuntime() as any;
-  const log = runtime?.log ?? console.log;
-  const error = runtime?.error ?? console.error;
+  const log = logger.log;
 
   const artifact: A2ATaskArtifactUpdateEvent = {
     taskId,
@@ -181,9 +176,7 @@ export interface SendStatusUpdateParams {
 export async function sendStatusUpdate(params: SendStatusUpdateParams): Promise<void> {
   const { config, sessionId, taskId, messageId, text, state } = params;
 
-  const runtime = getXiaoYiRuntime() as any;
-  const log = runtime?.log ?? console.log;
-  const error = runtime?.error ?? console.error;
+  const log = logger.log;
 
   // Build status update event following A2A protocol standard
   const statusUpdate: A2ATaskStatusUpdateEvent = {
@@ -254,9 +247,7 @@ export interface SendCommandParams {
 export async function sendCommand(params: SendCommandParams): Promise<void> {
   const { config, sessionId, taskId, messageId, command } = params;
 
-  const runtime = getXiaoYiRuntime() as any;
-  const log = runtime?.log ?? console.log;
-  const error = runtime?.error ?? console.error;
+  const log = logger.log;
 
   // Build artifact update with command as data
   // Wrap command in commands array as per protocol requirement
@@ -326,9 +317,7 @@ export interface SendClearContextResponseParams {
 export async function sendClearContextResponse(params: SendClearContextResponseParams): Promise<void> {
   const { config, sessionId, messageId } = params;
 
-  const runtime = getXiaoYiRuntime() as any;
-  const log = runtime?.log ?? console.log;
-  const error = runtime?.error ?? console.error;
+  const log = logger.log;
 
   // Build JSON-RPC response for clearContext
   const jsonRpcResponse = {
@@ -376,9 +365,7 @@ export interface SendTasksCancelResponseParams {
 export async function sendTasksCancelResponse(params: SendTasksCancelResponseParams): Promise<void> {
   const { config, sessionId, taskId, messageId } = params;
 
-  const runtime = getXiaoYiRuntime() as any;
-  const log = runtime?.log ?? console.log;
-  const error = runtime?.error ?? console.error;
+  const log = logger.log;
 
   // Build JSON-RPC response for tasks/cancel
   // Note: Using any to bypass type check as the response format differs from standard A2A types

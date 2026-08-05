@@ -1,5 +1,4 @@
 // File download utilities
-import fetch from "node-fetch";
 import fs from "fs/promises";
 import path from "path";
 import { logger } from "./xy-utils/logger.js";

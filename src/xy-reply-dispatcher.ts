@@ -1,13 +1,17 @@
-// Reply dispatcher - adapted for openclaw 6.6 with streaming improvements
-import type { ClawdbotConfig, RuntimeEnv, ReplyPayload } from "openclaw/plugin-sdk";
+// Reply dispatcher - adapted for OpenClaw 2026.6+ with streaming improvements
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
+import type { ReplyPayload } from "openclaw/plugin-sdk/reply-payload";
+import type { GetReplyOptions } from "openclaw/plugin-sdk/reply-runtime";
+import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
+import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 import { getXYRuntime } from "./runtime.js";
 
-import { sendA2AResponse, sendStatusUpdate, sendReasoningTextUpdate } from "./xy-formatter.js";
+import { sendA2AResponse, sendStatusUpdate } from "./xy-formatter.js";
 import { resolveXYConfig } from "./xy-config.js";
 import type { XiaoYiChannelConfig } from "./types.js";
 
 export interface CreateXYReplyDispatcherParams {
-  cfg: ClawdbotConfig;
+  cfg: OpenClawConfig;
   runtime: RuntimeEnv;
   sessionId: string;
   taskId: string;
@@ -15,22 +19,42 @@ export interface CreateXYReplyDispatcherParams {
   accountId: string;
 }
 
+type ReplyDispatcherWithTypingResult = ReturnType<
+  PluginRuntime["channel"]["reply"]["createReplyDispatcherWithTyping"]
+>;
+
+export type XYReplyDispatcher = Omit<ReplyDispatcherWithTypingResult, "replyOptions"> & {
+  replyOptions: GetReplyOptions;
+  startStatusInterval: () => void;
+  stopStatusInterval: () => void;
+};
+
+export type XYNoReplyDisposition = "deferred" | "failed";
+
+export function resolveXYNoReplyDisposition(params: {
+  agentRunStarted: boolean;
+}): XYNoReplyDisposition {
+  return params.agentRunStarted ? "failed" : "deferred";
+}
+
 /**
  * Create a reply dispatcher for XY channel messages.
- * Ported streaming improvements from xy_channel for openclaw 6.6:
+ * Ported streaming improvements from xy_channel:
  * - processingLock: serialized promise chain to prevent concurrent WebSocket sends
  * - Model-call boundary detection via prevModelText/currentModelText
  * - finalReplyText capture from deliver(kind: "final") for authoritative final frame
  */
-export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): any {
+export function createXYReplyDispatcher(
+  params: CreateXYReplyDispatcherParams,
+): XYReplyDispatcher {
   const { cfg, runtime, sessionId, taskId, messageId, accountId } = params;
   const log = runtime?.log ?? console.log;
   const error = runtime?.error ?? console.error;
 
   log(`[DISPATCHER-CREATE] Creating dispatcher for session=${sessionId}, taskId=${taskId}`);
 
-  // Get OpenClaw PluginRuntime via runtime store (openclaw 6.6 pattern)
-  const core = getXYRuntime() as any;
+  // Get OpenClaw PluginRuntime via the 2026.6+ runtime store.
+  const core = getXYRuntime();
 
   // Resolve configuration
   const config: XiaoYiChannelConfig = resolveXYConfig(cfg);
@@ -44,7 +68,9 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
   // Track state
   let hasSentResponse = false;
   let finalSent = false;
+  let finalizationStarted = false;
   let accumulatedText = "";
+  let agentRunStarted = false;
 
   // Streaming state (ported from xy_channel)
   let processingLock: Promise<void> = Promise.resolve();
@@ -75,7 +101,7 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
     }
   };
 
-  const { dispatcher, replyOptions, markDispatchIdle } =
+  const { dispatcher, replyOptions, markDispatchIdle, markRunComplete } =
     core.channel.reply.createReplyDispatcherWithTyping({
       responsePrefix: prefixContext.responsePrefix,
       responsePrefixContextProvider: prefixContext.responsePrefixContextProvider,
@@ -132,7 +158,17 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
       },
 
       onIdle: async () => {
-        log(`[ON_IDLE] Reply idle for session ${sessionId}, hasSentResponse=${hasSentResponse}, finalSent=${finalSent}`);
+        log(`[ON_IDLE] Reply idle for session ${sessionId}, hasSentResponse=${hasSentResponse}, finalSent=${finalSent}, agentRunStarted=${agentRunStarted}`);
+
+        if (finalizationStarted || finalSent) {
+          return;
+        }
+
+        const noReplyDisposition = resolveXYNoReplyDisposition({
+          agentRunStarted,
+        });
+
+        finalizationStarted = true;
 
         try {
           if (hasSentResponse && !finalSent) {
@@ -186,6 +222,28 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
             }
             finalSent = true;
             log(`[ON_IDLE] Sent final response`);
+          } else if (noReplyDisposition === "deferred") {
+            // OpenClaw 2026.6+ returns without starting a second run when the
+            // prompt is steered or queued behind an active session.
+            await sendStatusUpdate({
+              config,
+              sessionId,
+              taskId,
+              messageId,
+              text: "消息已接收~",
+              state: "completed",
+            });
+            await sendA2AResponse({
+              config,
+              sessionId,
+              taskId,
+              messageId,
+              text: "",
+              append: true,
+              final: true,
+            });
+            finalSent = true;
+            log(`[ON_IDLE] Closed deferred task accepted by OpenClaw`);
           } else {
             log(`[ON_IDLE] No response sent, sending failure`);
             await sendStatusUpdate({
@@ -226,6 +284,9 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
       suppressTyping: true,
       suppressToolErrorWarnings: true,
       onModelSelected: prefixContext.onModelSelected,
+      onAgentRunStart: () => {
+        agentRunStarted = true;
+      },
 
       // Tool execution start callback
       onToolStart: async ({ name, phase }) => {
@@ -327,6 +388,7 @@ export function createXYReplyDispatcher(params: CreateXYReplyDispatcherParams): 
       },
     },
     markDispatchIdle,
+    markRunComplete,
     startStatusInterval,
     stopStatusInterval,
   };
