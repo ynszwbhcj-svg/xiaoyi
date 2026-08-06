@@ -9,6 +9,15 @@ import { getXYRuntime } from "./runtime.js";
 import { sendA2AResponse, sendStatusUpdate } from "./xy-formatter.js";
 import { resolveXYConfig } from "./xy-config.js";
 import type { XiaoYiChannelConfig } from "./types.js";
+import {
+  buildXYApprovalPrompt,
+  extractXYApprovalCommand,
+  isPendingXYApprovalEvent,
+  isPendingXYApprovalText,
+  registerPendingXYApproval,
+  type XYApprovalEvent,
+} from "./xy-approval-manager.js";
+import { configManager } from "./xy-utils/config-manager.js";
 
 export interface CreateXYReplyDispatcherParams {
   cfg: OpenClawConfig;
@@ -17,6 +26,7 @@ export interface CreateXYReplyDispatcherParams {
   taskId: string;
   messageId: string;
   accountId: string;
+  approvalContinuation?: boolean;
 }
 
 type ReplyDispatcherWithTypingResult = ReturnType<
@@ -47,7 +57,15 @@ export function resolveXYNoReplyDisposition(params: {
 export function createXYReplyDispatcher(
   params: CreateXYReplyDispatcherParams,
 ): XYReplyDispatcher {
-  const { cfg, runtime, sessionId, taskId, messageId, accountId } = params;
+  const {
+    cfg,
+    runtime,
+    sessionId,
+    taskId,
+    messageId,
+    accountId,
+    approvalContinuation = false,
+  } = params;
   const log = runtime?.log ?? console.log;
   const error = runtime?.error ?? console.error;
 
@@ -71,6 +89,9 @@ export function createXYReplyDispatcher(
   let finalizationStarted = false;
   let accumulatedText = "";
   let agentRunStarted = false;
+  let approvalPending = false;
+  let approvalPromptText = "";
+  let approvalStatusSent = false;
 
   // Streaming state (ported from xy_channel)
   let processingLock: Promise<void> = Promise.resolve();
@@ -101,6 +122,47 @@ export function createXYReplyDispatcher(
     }
   };
 
+  const markApprovalPending = (params: XYApprovalEvent & { text?: string }): boolean => {
+    const parsedCommand = extractXYApprovalCommand(params.text);
+    if (!isPendingXYApprovalEvent(params) && !isPendingXYApprovalText(params.text)) {
+      return false;
+    }
+
+    approvalPending = true;
+    stopStatusInterval();
+    approvalPromptText = params.text?.trim() || buildXYApprovalPrompt(params);
+    registerPendingXYApproval({
+      config,
+      sessionId,
+      taskId,
+      messageId,
+      approvalId: params.approvalId,
+      approvalSlug: params.approvalSlug || parsedCommand?.approvalRef,
+      pushId: configManager.getPushId(sessionId) ?? undefined,
+    });
+    return true;
+  };
+
+  const sendApprovalStatusOnce = async (): Promise<void> => {
+    if (!approvalPending || approvalStatusSent) {
+      return;
+    }
+    approvalStatusSent = true;
+    try {
+      await sendStatusUpdate({
+        config,
+        sessionId,
+        taskId,
+        messageId,
+        text: approvalPromptText || "任务等待授权，请输入 /approve 命令。",
+        state: "input-required",
+      });
+    } catch (err) {
+      approvalStatusSent = false;
+      throw err;
+    }
+  };
+
   const { dispatcher, replyOptions, markDispatchIdle, markRunComplete } =
     core.channel.reply.createReplyDispatcherWithTyping({
       responsePrefix: prefixContext.responsePrefix,
@@ -117,6 +179,8 @@ export function createXYReplyDispatcher(
         log(`[DELIVER] sessionId=${sessionId}, info.kind=${info?.kind}, text.length=${text.length}`);
 
         try {
+          markApprovalPending({ text });
+
           // Capture canonical final text
           if (info?.kind === "final") {
             finalReplyText = text;
@@ -171,6 +235,19 @@ export function createXYReplyDispatcher(
         finalizationStarted = true;
 
         try {
+          if (approvalContinuation) {
+            await processingLock;
+            log(`[ON_IDLE] Suppressed approval acknowledgement; awaiting async exec result`);
+            return;
+          }
+
+          if (approvalPending) {
+            await processingLock;
+            await sendApprovalStatusOnce();
+            log(`[ON_IDLE] Left task open while exec approval is pending`);
+            return;
+          }
+
           if (hasSentResponse && !finalSent) {
             // Wait for in-flight onPartialReply to complete
             await processingLock;
@@ -288,6 +365,17 @@ export function createXYReplyDispatcher(
         agentRunStarted = true;
       },
 
+      onApprovalEvent: async (payload) => {
+        if (!markApprovalPending(payload)) {
+          return;
+        }
+        try {
+          await sendApprovalStatusOnce();
+        } catch (err) {
+          error(`[APPROVAL] Failed to send input-required status:`, err);
+        }
+      },
+
       // Tool execution start callback
       onToolStart: async ({ name, phase }) => {
         if (phase === "start") {
@@ -311,9 +399,17 @@ export function createXYReplyDispatcher(
       onToolResult: async (payload: ReplyPayload) => {
         const text = payload.text ?? "";
         const hasMedia = Boolean(payload.mediaUrl || (payload.mediaUrls?.length ?? 0) > 0);
+        markApprovalPending({ text });
 
         try {
           if (text.length > 0 || hasMedia) {
+            if (approvalContinuation) {
+              return;
+            }
+            if (approvalPending) {
+              await sendApprovalStatusOnce();
+              return;
+            }
             const resultText = text.length > 0 ? text : "工具执行完成";
             await sendStatusUpdate({
               config,
@@ -348,6 +444,7 @@ export function createXYReplyDispatcher(
         const text = payload.text ?? "";
         if (text.length === 0) return;
 
+        markApprovalPending({ text });
         hasSentResponse = true;
 
         // Serialized promise chain to prevent concurrent sends
@@ -370,6 +467,10 @@ export function createXYReplyDispatcher(
 
           const sep = prevModelText ? "\n" : "";
           const fullText = prevModelText + sep + text;
+
+          if (approvalContinuation || approvalPending) {
+            return;
+          }
 
           await sendA2AResponse({
             config,

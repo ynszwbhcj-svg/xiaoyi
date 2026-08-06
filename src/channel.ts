@@ -10,6 +10,12 @@ import {
 } from "./types.js";
 import { getLatestSessionContext } from "./xy-tools/session-manager.js";
 import { xiaoyiSetupAdapter, xiaoyiSetupWizard } from "./setup.js";
+import { deliverPendingXYApprovalText } from "./xy-approval-delivery.js";
+import {
+  clearPendingXYApproval,
+  getLatestPendingXYApproval,
+  getPendingXYApproval,
+} from "./xy-approval-manager.js";
 
 // Special marker for default push delivery when no target is specified (cron/announce mode)
 const DEFAULT_PUSH_MARKER = "default";
@@ -209,6 +215,15 @@ export const xiaoyiPlugin: ChannelPlugin<ResolvedXiaoYiAccount> = {
 
     resolveTarget: ({ to }) => {
       if (!to || to.trim() === "") {
+        // OpenClaw 2026.6 loses the external plugin target on async approval
+        // follow-ups. Recover the latest pending A2A task as a compatibility
+        // fallback; OpenClaw 2026.7 supplies the session target directly.
+        const pendingApproval = getLatestPendingXYApproval();
+        if (pendingApproval) {
+          const recoveredTarget = `${pendingApproval.sessionId}::${pendingApproval.taskId}`;
+          console.log(`[xiaoyi.resolveTarget] Recovered pending approval target`);
+          return { ok: true as const, to: recoveredTarget };
+        }
         console.log(`[xiaoyi.resolveTarget] No target specified, using default push marker`);
         return { ok: true as const, to: DEFAULT_PUSH_MARKER };
       }
@@ -248,8 +263,29 @@ export const xiaoyiPlugin: ChannelPlugin<ResolvedXiaoYiAccount> = {
         actualTo = to.split("::")[0];
       }
 
+      // Exec approvals complete asynchronously after the inbound A2A request
+      // has returned. Resume the original input-required task before using the
+      // optional webhook push transport.
+      const pendingApproval = getPendingXYApproval(actualTo);
+      if (pendingApproval) {
+        try {
+          const delivered = await deliverPendingXYApprovalText({
+            sessionId: actualTo,
+            text,
+          });
+          if (delivered) {
+            console.log(`[xiaoyi.sendText] Approval follow-up delivered to pending A2A task`);
+            return delivered;
+          }
+        } catch (error) {
+          console.warn(
+            `[xiaoyi.sendText] A2A approval follow-up failed, trying push fallback: ${String(error)}`,
+          );
+        }
+      }
+
       // Override pushId with dynamic per-session pushId if available
-      const dynamicPushId = configManager.getPushId(actualTo);
+      const dynamicPushId = pendingApproval?.pushId || configManager.getPushId(actualTo);
       if (dynamicPushId) {
         config.pushId = dynamicPushId;
       }
@@ -261,9 +297,17 @@ export const xiaoyiPlugin: ChannelPlugin<ResolvedXiaoYiAccount> = {
       // Truncate content to 1000 chars
       const pushText = text.length > 1000 ? text.slice(0, 1000) : text;
 
-      await pushService.sendPush(pushText, title);
+      const sent = await pushService.sendPush(pushText, title);
+      if (!sent) {
+        throw new Error(
+          "XiaoYi outbound delivery failed: no active approval task and push is unavailable",
+        );
+      }
 
       console.log(`[xiaoyi.sendText] Push sent successfully`);
+      if (pendingApproval) {
+        clearPendingXYApproval(actualTo, pendingApproval.taskId);
+      }
 
       return {
         channel: "xiaoyi",

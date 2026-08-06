@@ -3,13 +3,25 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { getXYRuntime } from "./runtime.js";
 import { createXYReplyDispatcher } from "./xy-reply-dispatcher.js";
-import { parseA2AMessage, extractTextFromParts, extractFileParts, extractPushId, isClearContextMessage, isTasksCancelMessage } from "./xy-parser.js";
+import {
+  buildXYInboundMessageId,
+  parseA2AMessage,
+  extractTextFromParts,
+  extractFileParts,
+  extractPushId,
+  isClearContextMessage,
+  isTasksCancelMessage,
+} from "./xy-parser.js";
 import { downloadFilesFromParts } from "./file-download.js";
 import { resolveXYConfig } from "./xy-config.js";
 import { sendStatusUpdate, sendClearContextResponse, sendTasksCancelResponse } from "./xy-formatter.js";
 import { registerSession, unregisterSession } from "./xy-tools/session-manager.js";
 import { configManager } from "./xy-utils/config-manager.js";
 import { XIAOYI_CHANNEL_ID, type A2AJsonRpcRequest } from "./types.js";
+import {
+  clearPendingXYApproval,
+  isPendingXYApprovalCommand,
+} from "./xy-approval-manager.js";
 
 /**
  * Parameters for handling an XY message.
@@ -19,6 +31,7 @@ export interface HandleXYMessageParams {
   runtime: RuntimeEnv;
   message: A2AJsonRpcRequest;
   accountId: string;
+  inboundMessageId?: string;
 }
 
 /**
@@ -47,6 +60,7 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
       }
       log(`Clear context request for session ${sessionId}`);
       const config = resolveXYConfig(cfg);
+      clearPendingXYApproval(sessionId);
       await sendClearContextResponse({
         config,
         sessionId,
@@ -64,6 +78,7 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
       }
       log(`Tasks cancel request for session ${sessionId}, task ${taskId}`);
       const config = resolveXYConfig(cfg);
+      clearPendingXYApproval(sessionId);
       await sendTasksCancelResponse({
         config,
         sessionId,
@@ -136,6 +151,10 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
     // Extract text and files from parts
     const text = extractTextFromParts(parsed.parts);
     const fileParts = extractFileParts(parsed.parts);
+    // XiaoYi reuses the original A2A task for `/approve`. The short OpenClaw
+    // acknowledgement must not complete that task; the asynchronous exec
+    // result will close it through the pending-approval delivery path.
+    const approvalContinuation = isPendingXYApprovalCommand(parsed.sessionId, text);
 
     // Download files if present (using core's media download)
     const mediaList = await downloadFilesFromParts(fileParts);
@@ -178,7 +197,9 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
       SenderId: parsed.sessionId,
       Provider: XIAOYI_CHANNEL_ID,
       Surface: XIAOYI_CHANNEL_ID,
-      MessageSid: parsed.messageId,
+      // The A2A id remains unchanged for replies, but OpenClaw needs a content-
+      // aware id because XiaoYi may reuse the task id for `/approve` input.
+      MessageSid: params.inboundMessageId ?? buildXYInboundMessageId(message),
       Timestamp: Date.now(),
       WasMentioned: false,
       CommandAuthorized: true,
@@ -204,6 +225,7 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
       taskId: parsed.taskId,
       messageId: parsed.messageId,
       accountId: route.accountId,  // ✅ Use route.accountId
+      approvalContinuation,
     });
     log(`[BOT-DISPATCHER] ✅ Reply dispatcher created successfully`);
 

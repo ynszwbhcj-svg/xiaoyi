@@ -16,6 +16,7 @@
 - WebSocket 心跳、断线重连和连接状态上报
 - 文件消息下载和媒体上下文
 - 同会话运行中消息可交给 OpenClaw `steer` 队列处理
+- `exec.mode: "ask"` 审批提示、`/approve` 及异步结果回送
 - 清空上下文与取消任务
 - OpenClaw 2026.6+ Plugin SDK 的 Channel 入口和配置向导
 
