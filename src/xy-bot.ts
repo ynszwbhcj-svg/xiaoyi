@@ -1,5 +1,6 @@
 // Message dispatch engine - following feishu/bot.ts pattern (simplified)
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
+import { getReplyFromConfig } from "openclaw/plugin-sdk/reply-runtime";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { getXYRuntime } from "./runtime.js";
 import { createXYReplyDispatcher } from "./xy-reply-dispatcher.js";
@@ -22,6 +23,12 @@ import {
   clearPendingXYApproval,
   isPendingXYApprovalCommand,
 } from "./xy-approval-manager.js";
+import {
+  clearXYTurns,
+  hasXYTurnParent,
+  registerXYTurn,
+  resolveXYConfiguredQueueMode,
+} from "./xy-turn-coordinator.js";
 
 /**
  * Parameters for handling an XY message.
@@ -32,6 +39,31 @@ export interface HandleXYMessageParams {
   message: A2AJsonRpcRequest;
   accountId: string;
   inboundMessageId?: string;
+}
+
+/**
+ * OpenClaw 2026.7.1 added active-dispatch admission for channel-owned queued
+ * follow-ups. Older supported hosts need to enter getReplyFromConfig directly
+ * for an overlapping steer turn, otherwise dispatchReplyFromConfig waits for
+ * the parent run and steer can never observe it as active.
+ */
+export function shouldUseLegacyXYSteerDispatch(params: {
+  hostVersion: string;
+  hasParentTurn: boolean;
+  configuredQueueMode: ReturnType<typeof resolveXYConfiguredQueueMode>;
+}): boolean {
+  if (!params.hasParentTurn || params.configuredQueueMode !== "steer") {
+    return false;
+  }
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(params.hostVersion.trim());
+  if (!match) {
+    return false;
+  }
+  const [, year, month, patch] = match.map(Number);
+  return (
+    year < 2026 ||
+    (year === 2026 && (month < 7 || (month === 7 && patch < 1)))
+  );
 }
 
 /**
@@ -61,6 +93,7 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
       log(`Clear context request for session ${sessionId}`);
       const config = resolveXYConfig(cfg);
       clearPendingXYApproval(sessionId);
+      clearXYTurns(sessionId);
       await sendClearContextResponse({
         config,
         sessionId,
@@ -79,6 +112,7 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
       log(`Tasks cancel request for session ${sessionId}, task ${taskId}`);
       const config = resolveXYConfig(cfg);
       clearPendingXYApproval(sessionId);
+      clearXYTurns(sessionId);
       await sendTasksCancelResponse({
         config,
         sessionId,
@@ -155,6 +189,18 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
     // acknowledgement must not complete that task; the asynchronous exec
     // result will close it through the pending-approval delivery path.
     const approvalContinuation = isPendingXYApprovalCommand(parsed.sessionId, text);
+    const turnHandle = approvalContinuation
+      ? undefined
+      : registerXYTurn(
+          {
+            config,
+            sessionId: parsed.sessionId,
+            taskId: parsed.taskId,
+            messageId: parsed.messageId,
+          },
+          params.inboundMessageId ?? buildXYInboundMessageId(message),
+          resolveXYConfiguredQueueMode(cfg) === "steer",
+        );
 
     // Download files if present (using core's media download)
     const mediaList = await downloadFilesFromParts(fileParts);
@@ -226,6 +272,7 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
       messageId: parsed.messageId,
       accountId: route.accountId,  // ✅ Use route.accountId
       approvalContinuation,
+      turnHandle,
     });
     log(`[BOT-DISPATCHER] ✅ Reply dispatcher created successfully`);
 
@@ -238,16 +285,66 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
     // Dispatch to OpenClaw core using correct API (following feishu pattern)
     log(`[BOT] 🚀 Starting dispatcher with session: ${route.sessionKey}`);
 
+    const configuredQueueMode = resolveXYConfiguredQueueMode(cfg);
+    const useLegacySteerDispatch = shouldUseLegacyXYSteerDispatch({
+      hostVersion: core.version,
+      hasParentTurn: Boolean(turnHandle && hasXYTurnParent(turnHandle)),
+      configuredQueueMode,
+    });
+
     try {
       await core.channel.reply.withReplyDispatcher({
         dispatcher,
-        run: () =>
-          core.channel.reply.dispatchReplyFromConfig({
-            ctx: ctxPayload,
+        run: async () => {
+          if (!useLegacySteerDispatch) {
+            return core.channel.reply.dispatchReplyFromConfig({
+              ctx: ctxPayload,
+              cfg,
+              dispatcher,
+              replyOptions,
+            });
+          }
+
+          log(
+            `[BOT] Using OpenClaw ${core.version} legacy steer admission for session ${route.sessionKey}`,
+          );
+          let queued = false;
+          let completeQueuedTurn: (() => void) | undefined;
+          const queuedTurnComplete = new Promise<void>((resolve) => {
+            completeQueuedTurn = resolve;
+          });
+          const inheritedLifecycle = replyOptions.queuedFollowupLifecycle;
+          const result = await getReplyFromConfig(
+            ctxPayload,
+            {
+              ...replyOptions,
+              queuedFollowupLifecycle: {
+                onEnqueued: () => {
+                  queued = true;
+                  inheritedLifecycle?.onEnqueued?.();
+                },
+                onComplete: () => {
+                  inheritedLifecycle?.onComplete?.();
+                  completeQueuedTurn?.();
+                },
+              },
+              onBlockReply: (payload) => {
+                dispatcher.sendBlockReply(payload);
+              },
+            },
             cfg,
-            dispatcher,
-            replyOptions,
-          }),
+          );
+
+          const replies = result ? (Array.isArray(result) ? result : [result]) : [];
+          replies.forEach((payload) => dispatcher.sendFinalReply(payload));
+
+          // A session-level /queue override may turn the configured steer into
+          // a real queued follow-up. Keep this dispatcher alive until the core
+          // finishes that run so its reply remains separate and deliverable.
+          if (queued) {
+            await queuedTurnComplete;
+          }
+        },
       });
     } finally {
       markRunComplete();

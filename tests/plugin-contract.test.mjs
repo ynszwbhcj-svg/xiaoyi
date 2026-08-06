@@ -4,8 +4,23 @@ import test from "node:test";
 import pluginDefinition from "../dist/index.js";
 import { xiaoyiPlugin } from "../dist/channel.js";
 import { createXYMessageRunner } from "../dist/xy-message-runner.js";
+import { shouldUseLegacyXYSteerDispatch } from "../dist/xy-bot.js";
 import { buildXYInboundMessageId } from "../dist/xy-parser.js";
-import { resolveXYNoReplyDisposition } from "../dist/xy-reply-dispatcher.js";
+import {
+  resolveXYNoReplyDisposition,
+  shouldAdoptXYSteerTurn,
+} from "../dist/xy-reply-dispatcher.js";
+import {
+  adoptXYSteerTurn,
+  clearXYTurns,
+  completeXYTurn,
+  markXYTurnStarted,
+  pendingXYTurnCount,
+  registerXYTurn,
+  resolveXYConfiguredQueueMode,
+  resolveXYTurnTarget,
+  settleXYTurnTarget,
+} from "../dist/xy-turn-coordinator.js";
 import { deliverPendingXYApprovalText } from "../dist/xy-approval-delivery.js";
 import {
   buildXYApprovalPrompt,
@@ -144,6 +159,143 @@ test("forwards distinct same-session messages without waiting for the active tas
   assert.deepEqual(errors, []);
 });
 
+test("routes one adopted steer response to the latest XiaoYi task", () => {
+  clearXYTurns();
+  const config = { enabled: true, ak: "ak", sk: "sk", agentId: "agent" };
+  const sports = registerXYTurn(
+    { config, sessionId: "news", taskId: "sports-task", messageId: "sports-message" },
+    "sports-turn",
+  );
+  const entertainment = registerXYTurn(
+    {
+      config,
+      sessionId: "news",
+      taskId: "entertainment-task",
+      messageId: "entertainment-message",
+    },
+    "entertainment-turn",
+  );
+
+  assert.equal(resolveXYTurnTarget(sports)?.taskId, "sports-task");
+  assert.equal(adoptXYSteerTurn(entertainment), true);
+  assert.deepEqual(completeXYTurn(sports), {
+    config,
+    sessionId: "news",
+    taskId: "entertainment-task",
+    messageId: "entertainment-message",
+  });
+  assert.equal(pendingXYTurnCount("news"), 0);
+});
+
+test("uses XiaoYi channel queue mode before global mode and defaults to steer", () => {
+  assert.equal(resolveXYConfiguredQueueMode({}), "steer");
+  assert.equal(
+    resolveXYConfiguredQueueMode({ messages: { queue: { mode: "followup" } } }),
+    "followup",
+  );
+  assert.equal(
+    resolveXYConfiguredQueueMode({
+      messages: {
+        queue: { mode: "followup", byChannel: { xiaoyi: "steer" } },
+      },
+    }),
+    "steer",
+  );
+});
+
+test("bypasses legacy dispatch admission only for overlapping steer turns", () => {
+  const base = { hasParentTurn: true, configuredQueueMode: "steer" };
+  for (const hostVersion of [
+    "2026.6.6",
+    "2026.6.10",
+    "2026.7.0",
+  ]) {
+    assert.equal(
+      shouldUseLegacyXYSteerDispatch({ ...base, hostVersion }),
+      true,
+      `${hostVersion} should use legacy steer admission`,
+    );
+  }
+  for (const hostVersion of ["2026.7.1", "2026.7.1-2", "2026.7.20"]) {
+    assert.equal(
+      shouldUseLegacyXYSteerDispatch({ ...base, hostVersion }),
+      false,
+      `${hostVersion} should use native queued dispatch admission`,
+    );
+  }
+  assert.equal(
+    shouldUseLegacyXYSteerDispatch({
+      ...base,
+      hostVersion: "2026.6.6",
+      configuredQueueMode: "followup",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldUseLegacyXYSteerDispatch({
+      ...base,
+      hostVersion: "2026.6.6",
+      hasParentTurn: false,
+    }),
+    false,
+  );
+});
+
+test("falls back to the latest fused steer target on OpenClaw 2026.6", async () => {
+  clearXYTurns();
+  const config = { enabled: true, ak: "ak", sk: "sk", agentId: "agent" };
+  const sports = registerXYTurn(
+    { config, sessionId: "legacy-news", taskId: "sports-task", messageId: "sports-message" },
+    "sports-turn",
+  );
+  registerXYTurn(
+    {
+      config,
+      sessionId: "legacy-news",
+      taskId: "entertainment-task",
+      messageId: "entertainment-message",
+    },
+    "entertainment-turn",
+    true,
+  );
+
+  assert.equal((await settleXYTurnTarget(sports, 0))?.taskId, "entertainment-task");
+  assert.equal(completeXYTurn(sports)?.taskId, "entertainment-task");
+  assert.equal(pendingXYTurnCount("legacy-news"), 0);
+});
+
+test("keeps followup runs as separate XiaoYi responses", () => {
+  clearXYTurns();
+  const config = { enabled: true, ak: "ak", sk: "sk", agentId: "agent" };
+  const active = registerXYTurn(
+    { config, sessionId: "news", taskId: "sports-task", messageId: "sports-message" },
+    "sports-turn",
+  );
+  const followup = registerXYTurn(
+    {
+      config,
+      sessionId: "news",
+      taskId: "combined-task",
+      messageId: "combined-message",
+    },
+    "entertainment-turn",
+  );
+
+  markXYTurnStarted(followup);
+  assert.deepEqual(completeXYTurn(active), {
+    config,
+    sessionId: "news",
+    taskId: "sports-task",
+    messageId: "sports-message",
+  });
+  assert.deepEqual(completeXYTurn(followup), {
+    config,
+    sessionId: "news",
+    taskId: "combined-task",
+    messageId: "combined-message",
+  });
+});
+
 test("distinguishes approval input when XiaoYi reuses the A2A message id", async () => {
   const base = {
     jsonrpc: "2.0",
@@ -215,6 +367,21 @@ test("distinguishes deferred active-session input from a failed agent run", () =
   assert.equal(
     resolveXYNoReplyDisposition({ agentRunStarted: true }),
     "failed",
+  );
+});
+
+test("adopts only a turn accepted by an existing run as steer", () => {
+  assert.equal(
+    shouldAdoptXYSteerTurn({ agentRunStarted: false, turnAdopted: true }),
+    true,
+  );
+  assert.equal(
+    shouldAdoptXYSteerTurn({ agentRunStarted: true, turnAdopted: true }),
+    false,
+  );
+  assert.equal(
+    shouldAdoptXYSteerTurn({ agentRunStarted: false, turnAdopted: false }),
+    false,
   );
 });
 
