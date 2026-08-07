@@ -9,6 +9,26 @@ import { getXYRuntime } from "./runtime.js";
 import { sendA2AResponse, sendStatusUpdate } from "./xy-formatter.js";
 import { resolveXYConfig } from "./xy-config.js";
 import type { XiaoYiChannelConfig } from "./types.js";
+import {
+  buildXYApprovalPrompt,
+  extractXYApprovalCommand,
+  isPendingXYApprovalEvent,
+  isPendingXYApprovalText,
+  registerPendingXYApproval,
+  type XYApprovalEvent,
+} from "./xy-approval-manager.js";
+import { configManager } from "./xy-utils/config-manager.js";
+import {
+  abandonXYTurn,
+  adoptXYSteerTurn,
+  completeXYTurn,
+  hasXYTurnParent,
+  markXYTurnStarted,
+  resolveXYTurnTarget,
+  settleXYTurnTarget,
+  type XYTurnHandle,
+  type XYTurnTarget,
+} from "./xy-turn-coordinator.js";
 
 export interface CreateXYReplyDispatcherParams {
   cfg: OpenClawConfig;
@@ -17,6 +37,8 @@ export interface CreateXYReplyDispatcherParams {
   taskId: string;
   messageId: string;
   accountId: string;
+  approvalContinuation?: boolean;
+  turnHandle?: XYTurnHandle;
 }
 
 type ReplyDispatcherWithTypingResult = ReturnType<
@@ -37,6 +59,13 @@ export function resolveXYNoReplyDisposition(params: {
   return params.agentRunStarted ? "failed" : "deferred";
 }
 
+export function shouldAdoptXYSteerTurn(params: {
+  agentRunStarted: boolean;
+  turnAdopted: boolean;
+}): boolean {
+  return params.turnAdopted && !params.agentRunStarted;
+}
+
 /**
  * Create a reply dispatcher for XY channel messages.
  * Ported streaming improvements from xy_channel:
@@ -47,7 +76,16 @@ export function resolveXYNoReplyDisposition(params: {
 export function createXYReplyDispatcher(
   params: CreateXYReplyDispatcherParams,
 ): XYReplyDispatcher {
-  const { cfg, runtime, sessionId, taskId, messageId, accountId } = params;
+  const {
+    cfg,
+    runtime,
+    sessionId,
+    taskId,
+    messageId,
+    accountId,
+    approvalContinuation = false,
+    turnHandle,
+  } = params;
   const log = runtime?.log ?? console.log;
   const error = runtime?.error ?? console.error;
 
@@ -58,6 +96,20 @@ export function createXYReplyDispatcher(
 
   // Resolve configuration
   const config: XiaoYiChannelConfig = resolveXYConfig(cfg);
+  const originalTarget: XYTurnTarget = { config, sessionId, taskId, messageId };
+  const resolveTarget = () =>
+    (turnHandle ? resolveXYTurnTarget(turnHandle) : null) ?? originalTarget;
+  const sendResponse = (
+    target: XYTurnTarget,
+    payload: { text?: string; append: boolean; final: boolean },
+  ) => sendA2AResponse({ ...target, ...payload });
+  const sendStatus = (
+    target: XYTurnTarget,
+    payload: {
+      text: string;
+      state: "submitted" | "working" | "input-required" | "completed" | "canceled" | "failed" | "unknown";
+    },
+  ) => sendStatusUpdate({ ...target, ...payload });
 
   // Reply prefix context: not needed for bot-to-bot A2A channel
   const prefixContext = { responsePrefix: undefined, responsePrefixContextProvider: undefined, onModelSelected: undefined };
@@ -71,6 +123,10 @@ export function createXYReplyDispatcher(
   let finalizationStarted = false;
   let accumulatedText = "";
   let agentRunStarted = false;
+  let turnAdopted = false;
+  let approvalPending = false;
+  let approvalPromptText = "";
+  let approvalStatusSent = false;
 
   // Streaming state (ported from xy_channel)
   let processingLock: Promise<void> = Promise.resolve();
@@ -81,11 +137,7 @@ export function createXYReplyDispatcher(
   const startStatusInterval = () => {
     log(`[STATUS INTERVAL] Starting interval for session ${sessionId}`);
     statusUpdateInterval = setInterval(() => {
-      void sendStatusUpdate({
-        config,
-        sessionId,
-        taskId,
-        messageId,
+      void sendStatus(resolveTarget(), {
         text: "任务正在处理中，请稍后~",
         state: "working",
       }).catch((err) => {
@@ -98,6 +150,43 @@ export function createXYReplyDispatcher(
     if (statusUpdateInterval) {
       clearInterval(statusUpdateInterval);
       statusUpdateInterval = null;
+    }
+  };
+
+  const markApprovalPending = (params: XYApprovalEvent & { text?: string }): boolean => {
+    const parsedCommand = extractXYApprovalCommand(params.text);
+    if (!isPendingXYApprovalEvent(params) && !isPendingXYApprovalText(params.text)) {
+      return false;
+    }
+
+    approvalPending = true;
+    stopStatusInterval();
+    approvalPromptText = params.text?.trim() || buildXYApprovalPrompt(params);
+    registerPendingXYApproval({
+      config,
+      sessionId,
+      taskId,
+      messageId,
+      approvalId: params.approvalId,
+      approvalSlug: params.approvalSlug || parsedCommand?.approvalRef,
+      pushId: configManager.getPushId(sessionId) ?? undefined,
+    });
+    return true;
+  };
+
+  const sendApprovalStatusOnce = async (): Promise<void> => {
+    if (!approvalPending || approvalStatusSent) {
+      return;
+    }
+    approvalStatusSent = true;
+    try {
+      await sendStatus(resolveTarget(), {
+        text: approvalPromptText || "任务等待授权，请输入 /approve 命令。",
+        state: "input-required",
+      });
+    } catch (err) {
+      approvalStatusSent = false;
+      throw err;
     }
   };
 
@@ -117,6 +206,8 @@ export function createXYReplyDispatcher(
         log(`[DELIVER] sessionId=${sessionId}, info.kind=${info?.kind}, text.length=${text.length}`);
 
         try {
+          markApprovalPending({ text });
+
           // Capture canonical final text
           if (info?.kind === "final") {
             finalReplyText = text;
@@ -143,11 +234,7 @@ export function createXYReplyDispatcher(
           stopStatusInterval();
 
           if (!hasSentResponse) {
-            await sendStatusUpdate({
-              config,
-              sessionId,
-              taskId,
-              messageId,
+            await sendStatus(resolveTarget(), {
               text: "处理失败，请稍后重试",
               state: "failed",
             });
@@ -171,6 +258,22 @@ export function createXYReplyDispatcher(
         finalizationStarted = true;
 
         try {
+          if (approvalContinuation) {
+            await processingLock;
+            log(`[ON_IDLE] Suppressed approval acknowledgement; awaiting async exec result`);
+            return;
+          }
+
+          if (approvalPending) {
+            await processingLock;
+            if (turnHandle) {
+              abandonXYTurn(turnHandle);
+            }
+            await sendApprovalStatusOnce();
+            log(`[ON_IDLE] Left task open while exec approval is pending`);
+            return;
+          }
+
           if (hasSentResponse && !finalSent) {
             // Wait for in-flight onPartialReply to complete
             await processingLock;
@@ -188,81 +291,78 @@ export function createXYReplyDispatcher(
             prevModelText = "";
             currentModelText = "";
 
-            // Send completion status
-            await sendStatusUpdate({
-              config,
-              sessionId,
-              taskId,
-              messageId,
+            if (turnHandle) {
+              await settleXYTurnTarget(turnHandle);
+            }
+            const completionTarget = turnHandle
+              ? completeXYTurn(turnHandle)
+              : originalTarget;
+            if (!completionTarget) {
+              throw new Error("XiaoYi turn target disappeared before final delivery");
+            }
+            await sendStatus(completionTarget, {
               text: "任务处理已完成~",
               state: "completed",
             });
-
-            // Send final response
-            if (fullFinalText) {
-              await sendA2AResponse({
-                config,
-                sessionId,
-                taskId,
-                messageId,
-                text: fullFinalText,
-                append: false,
-                final: true,
+            await sendResponse(completionTarget, {
+              text: fullFinalText,
+              append: !fullFinalText,
+              final: true,
+            });
+            finalSent = true;
+            log(`[ON_IDLE] Sent final response`);
+          } else if (noReplyDisposition === "deferred") {
+            // OpenClaw 2026.6+ returns without starting a second run when the
+            // prompt is steered or queued behind an active session.
+            const isAcceptedSteer = shouldAdoptXYSteerTurn({
+              agentRunStarted,
+              turnAdopted,
+            });
+            const adopted = isAcceptedSteer && turnHandle
+              ? adoptXYSteerTurn(turnHandle)
+              : false;
+            if (adopted) {
+              finalSent = true;
+              log(`[ON_IDLE] Steered turn adopted; parent run will answer latest XiaoYi task`);
+              return;
+            }
+            if (turnHandle && hasXYTurnParent(turnHandle)) {
+              finalizationStarted = false;
+              log(`[ON_IDLE] Deferred turn remains open pending steer/follow-up resolution`);
+              return;
+            }
+            const completionTarget = turnHandle
+              ? completeXYTurn(turnHandle)
+              : originalTarget;
+            if (completionTarget) {
+              await sendStatus(completionTarget, {
+                text: "消息已接收~",
+                state: "completed",
               });
-            } else {
-              await sendA2AResponse({
-                config,
-                sessionId,
-                taskId,
-                messageId,
+              await sendResponse(completionTarget, {
                 text: "",
                 append: true,
                 final: true,
               });
             }
             finalSent = true;
-            log(`[ON_IDLE] Sent final response`);
-          } else if (noReplyDisposition === "deferred") {
-            // OpenClaw 2026.6+ returns without starting a second run when the
-            // prompt is steered or queued behind an active session.
-            await sendStatusUpdate({
-              config,
-              sessionId,
-              taskId,
-              messageId,
-              text: "消息已接收~",
-              state: "completed",
-            });
-            await sendA2AResponse({
-              config,
-              sessionId,
-              taskId,
-              messageId,
-              text: "",
-              append: true,
-              final: true,
-            });
-            finalSent = true;
-            log(`[ON_IDLE] Closed deferred task accepted by OpenClaw`);
+            log(`[ON_IDLE] Closed deferred task without an active steer parent`);
           } else {
             log(`[ON_IDLE] No response sent, sending failure`);
-            await sendStatusUpdate({
-              config,
-              sessionId,
-              taskId,
-              messageId,
-              text: "任务处理中断了~",
-              state: "failed",
-            });
-            await sendA2AResponse({
-              config,
-              sessionId,
-              taskId,
-              messageId,
-              text: "任务执行异常，请重试~",
-              append: false,
-              final: true,
-            });
+            const completionTarget = turnHandle
+              ? completeXYTurn(turnHandle)
+              : originalTarget;
+            if (completionTarget) {
+              await sendStatus(completionTarget, {
+                text: "任务处理中断了~",
+                state: "failed",
+              });
+              await sendResponse(completionTarget, {
+                text: "任务执行异常，请重试~",
+                append: false,
+                final: true,
+              });
+            }
             finalSent = true;
           }
         } catch (err) {
@@ -286,6 +386,35 @@ export function createXYReplyDispatcher(
       onModelSelected: prefixContext.onModelSelected,
       onAgentRunStart: () => {
         agentRunStarted = true;
+        if (turnHandle) {
+          markXYTurnStarted(turnHandle);
+        }
+      },
+      onTurnAdopted: () => {
+        turnAdopted = true;
+      },
+      // OpenClaw 2026.7.1+ uses the presence of this lifecycle to admit a
+      // visible turn while another reply is active. The core can then apply
+      // the configured steer/followup/collect policy instead of serializing
+      // the entire dispatch before queue-mode resolution.
+      queuedFollowupLifecycle: {
+        onEnqueued: () => {
+          log(`[QUEUE] Turn queued behind the active run for session ${sessionId}`);
+        },
+        onComplete: () => {
+          log(`[QUEUE] Queued turn completed for session ${sessionId}`);
+        },
+      },
+
+      onApprovalEvent: async (payload) => {
+        if (!markApprovalPending(payload)) {
+          return;
+        }
+        try {
+          await sendApprovalStatusOnce();
+        } catch (err) {
+          error(`[APPROVAL] Failed to send input-required status:`, err);
+        }
       },
 
       // Tool execution start callback
@@ -293,11 +422,7 @@ export function createXYReplyDispatcher(
         if (phase === "start") {
           const toolName = name || "unknown";
           try {
-            await sendStatusUpdate({
-              config,
-              sessionId,
-              taskId,
-              messageId,
+            await sendStatus(resolveTarget(), {
               text: `正在使用工具: ${toolName}...`,
               state: "working",
             });
@@ -311,15 +436,19 @@ export function createXYReplyDispatcher(
       onToolResult: async (payload: ReplyPayload) => {
         const text = payload.text ?? "";
         const hasMedia = Boolean(payload.mediaUrl || (payload.mediaUrls?.length ?? 0) > 0);
+        markApprovalPending({ text });
 
         try {
           if (text.length > 0 || hasMedia) {
+            if (approvalContinuation) {
+              return;
+            }
+            if (approvalPending) {
+              await sendApprovalStatusOnce();
+              return;
+            }
             const resultText = text.length > 0 ? text : "工具执行完成";
-            await sendStatusUpdate({
-              config,
-              sessionId,
-              taskId,
-              messageId,
+            await sendStatus(resolveTarget(), {
               text: resultText,
               state: "working",
             });
@@ -348,6 +477,7 @@ export function createXYReplyDispatcher(
         const text = payload.text ?? "";
         if (text.length === 0) return;
 
+        markApprovalPending({ text });
         hasSentResponse = true;
 
         // Serialized promise chain to prevent concurrent sends
@@ -371,11 +501,11 @@ export function createXYReplyDispatcher(
           const sep = prevModelText ? "\n" : "";
           const fullText = prevModelText + sep + text;
 
-          await sendA2AResponse({
-            config,
-            sessionId,
-            taskId,
-            messageId,
+          if (approvalContinuation || approvalPending) {
+            return;
+          }
+
+          await sendResponse(resolveTarget(), {
             text: fullText,
             append: false,
             final: false,
@@ -386,6 +516,9 @@ export function createXYReplyDispatcher(
           releaseLock!();
         }
       },
+    } as GetReplyOptions & {
+      /** OpenClaw 2026.7.1 adoption signal; ignored safely by 2026.6.6. */
+      onTurnAdopted?: () => void | Promise<void>;
     },
     markDispatchIdle,
     markRunComplete,

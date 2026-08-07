@@ -7,6 +7,7 @@ import { resolveXYConfig } from "./xy-config.js";
 import { getXYWebSocketManager, removeXYWebSocketManager } from "./xy-client.js";
 import { handleXYMessage } from "./xy-bot.js";
 import { createXYMessageRunner } from "./xy-message-runner.js";
+import { buildXYInboundMessageId } from "./xy-parser.js";
 import type { A2AJsonRpcRequest } from "./types.js";
 
 export type MonitorXYOpts = {
@@ -68,7 +69,8 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
     const messageHandler = (message: A2AJsonRpcRequest) => {
       // Extract sessionId from message for queue routing
       const sessionId = message.params?.sessionId || message.id;
-      const messageKey = `${sessionId}::${message.id}`;
+      const inboundMessageId = buildXYInboundMessageId(message);
+      const messageKey = `${sessionId}::${inboundMessageId}`;
 
       log(`[MONITOR-HANDLER] messageHandler triggered: sessionId=${sessionId}, messageId=${message.id}`);
 
@@ -86,6 +88,7 @@ export async function monitorXYProvider(opts: MonitorXYOpts = {}): Promise<void>
           runtime,
           message,
           accountId,
+          inboundMessageId,
         });
         log(`[MONITOR-HANDLER] Completed handleXYMessage for messageKey=${messageKey}`);
       });

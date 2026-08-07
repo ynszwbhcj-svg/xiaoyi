@@ -1,5 +1,6 @@
 // A2A message parsing utilities
 import type { A2AJsonRpcRequest, A2AMessagePart, A2ADataEvent } from "./types.js";
+import { calculateSHA256String } from "./xy-utils/crypto.js";
 import { logger } from "./xy-utils/logger.js";
 
 /**
@@ -12,6 +13,35 @@ export interface ParsedA2AMessage {
   messageId: string;
   parts: A2AMessagePart[];
   method: string;
+}
+
+function stableSerialize(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableSerialize(entry)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableSerialize(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * Build the identity OpenClaw uses for inbound deduplication. XiaoYi can reuse
+ * one JSON-RPC id while an input-required task receives the user's next input,
+ * so the transport id alone would discard `/approve` as a replay.
+ */
+export function buildXYInboundMessageId(request: A2AJsonRpcRequest): string {
+  const content = stableSerialize({
+    method: request.method,
+    role: request.params?.message?.role,
+    parts: request.params?.message?.parts ?? [],
+  });
+  const contentHash = calculateSHA256String(content).slice(0, 16);
+  return `${request.id}:${contentHash}`;
 }
 
 /**
