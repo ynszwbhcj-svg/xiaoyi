@@ -9,6 +9,7 @@ import {
   shouldUseLegacyXYSteerDispatch,
 } from "../dist/xy-bot.js";
 import { buildXYInboundMessageId } from "../dist/xy-parser.js";
+import { buildA2AReasoningTextPart } from "../dist/xy-formatter.js";
 import {
   resolveXYFinalReplyText,
   resolveXYNoReplyDisposition,
@@ -393,23 +394,26 @@ test("distinguishes deferred active-session input from a failed agent run", () =
   );
 });
 
-test("uses only the final model call for a steer fusion answer", () => {
+test("uses only OpenClaw's canonical final frame for the answer body", () => {
   assert.equal(
     resolveXYFinalReplyText({
       finalReplyText: "体育与娱乐新闻的统一汇总",
-      currentModelText: "体育与娱乐新闻的统一汇总",
-      lastDeliveredText: "体育新闻搜索中……",
     }),
     "体育与娱乐新闻的统一汇总",
   );
   assert.equal(
     resolveXYFinalReplyText({
       finalReplyText: "",
-      currentModelText: "模型重新生成的融合答复",
-      lastDeliveredText: "被中断的体育新闻片段",
     }),
-    "模型重新生成的融合答复",
+    "",
   );
+});
+
+test("maps public partial output to XiaoYi reasoningText", () => {
+  assert.deepEqual(buildA2AReasoningTextPart("正在搜索体育新闻"), {
+    kind: "reasoningText",
+    reasoningText: "正在搜索体育新闻",
+  });
 });
 
 test("adopts only a turn accepted by an existing run as steer", () => {

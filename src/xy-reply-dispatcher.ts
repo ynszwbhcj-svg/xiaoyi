@@ -6,7 +6,11 @@ import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 import { getXYRuntime } from "./runtime.js";
 
-import { sendA2AResponse, sendStatusUpdate } from "./xy-formatter.js";
+import {
+  sendA2AResponse,
+  sendReasoningTextUpdate,
+  sendStatusUpdate,
+} from "./xy-formatter.js";
 import { resolveXYConfig } from "./xy-config.js";
 import type { XiaoYiChannelConfig } from "./types.js";
 import {
@@ -67,27 +71,23 @@ export function shouldAdoptXYSteerTurn(params: {
 }
 
 /**
- * Use the last model call as the authoritative answer. A steer can interrupt
- * an earlier model call; concatenating that abandoned text with the restarted
- * call produces two adjacent answers instead of one model-authored fusion.
+ * Use OpenClaw's canonical final frame as the authoritative answer. A steer
+ * can interrupt an earlier model call, so partial and block frames must never
+ * be promoted or concatenated into the XiaoYi response body.
  */
 export function resolveXYFinalReplyText(params: {
   finalReplyText: string;
-  currentModelText: string;
-  lastDeliveredText: string;
 }): string {
-  return (
-    params.finalReplyText ||
-    params.currentModelText ||
-    params.lastDeliveredText
-  );
+  // Partial and block replies are progress only. If OpenClaw does not provide
+  // a canonical final frame, returning an empty final is safer than promoting
+  // tool narration or an interrupted model call into the answer body.
+  return params.finalReplyText;
 }
 
 /**
  * Create a reply dispatcher for XY channel messages.
  * Ported streaming improvements from xy_channel:
  * - processingLock: serialized promise chain to prevent concurrent WebSocket sends
- * - Model-call boundary detection via prevModelText/currentModelText
  * - finalReplyText capture from deliver(kind: "final") for authoritative final frame
  */
 export function createXYReplyDispatcher(
@@ -138,7 +138,6 @@ export function createXYReplyDispatcher(
   let hasSentResponse = false;
   let finalSent = false;
   let finalizationStarted = false;
-  let lastDeliveredText = "";
   let agentRunStarted = false;
   let turnAdopted = false;
   let approvalPending = false;
@@ -148,8 +147,6 @@ export function createXYReplyDispatcher(
   // Streaming state (ported from xy_channel)
   let processingLock: Promise<void> = Promise.resolve();
   let finalReplyText = "";
-  let prevModelText = "";
-  let currentModelText = "";
 
   const startStatusInterval = () => {
     log(`[STATUS INTERVAL] Starting interval for session ${sessionId}`);
@@ -236,12 +233,10 @@ export function createXYReplyDispatcher(
             return;
           }
 
-          // onPartialReply handles streaming. Keep only the latest delivered
-          // reply as a fallback because earlier model calls may have been
-          // interrupted by steer and must not be appended to the final answer.
-          lastDeliveredText = text;
+          // onPartialReply handles visible progress. Non-final deliver frames
+          // are observed only for lifecycle tracking and never become body text.
           hasSentResponse = true;
-          log(`[DELIVER FALLBACK] Captured latest text, length=${lastDeliveredText.length}`);
+          log(`[DELIVER] Observed non-empty frame, length=${text.length}`);
         } catch (deliverError) {
           error(`Failed to deliver message:`, deliverError);
         }
@@ -301,13 +296,7 @@ export function createXYReplyDispatcher(
             // interrupted text is useful only as transient streaming progress.
             const fullFinalText = resolveXYFinalReplyText({
               finalReplyText,
-              currentModelText,
-              lastDeliveredText,
             });
-
-            // Reset for next turn
-            prevModelText = "";
-            currentModelText = "";
 
             if (turnHandle) {
               await settleXYTurnTarget(turnHandle);
@@ -478,16 +467,10 @@ export function createXYReplyDispatcher(
 
       // Reasoning/thinking process streaming callback
       onReasoningStream: async (payload: ReplyPayload) => {
+        // This callback carries private model reasoning. Never forward it to
+        // XiaoYi; visible progress comes exclusively from onPartialReply.
         const text = payload.text ?? "";
-        // Reasoning stream is received but not forwarded to A2A client
-        // (uncomment below to enable reasoning text streaming)
-        // if (text.length > 0) {
-        //   try {
-        //     await sendReasoningTextUpdate({ config, sessionId, taskId, messageId, text });
-        //   } catch (err) {
-        //     error(`[REASONING STREAM] Failed to send:`, err);
-        //   }
-        // }
+        log(`[REASONING STREAM] Received but not forwarded, length=${text.length}`);
       },
 
       // Partial reply streaming callback (real-time text streaming)
@@ -508,25 +491,21 @@ export function createXYReplyDispatcher(
         try {
           await prevLock;
 
-          // Model-call boundary detection: if current text doesn't begin
-          // with what we accumulated for the current model call, we've
-          // crossed a model-call boundary.
-          if (currentModelText && !text.startsWith(currentModelText)) {
-            prevModelText += (prevModelText ? "\n" : "") + currentModelText;
-          }
-          currentModelText = text;
-
-          const sep = prevModelText ? "\n" : "";
-          const fullText = prevModelText + sep + text;
-
           if (approvalContinuation || approvalPending) {
             return;
           }
 
-          await sendResponse(resolveTarget(), {
-            text: fullText,
+          if (config.enableStreaming === false) {
+            return;
+          }
+
+          // OpenClaw 2026.6 and 2026.7 both surface tool narration and search
+          // progress through partial replies. Keep it in XiaoYi's progress
+          // area; only deliver(kind="final") is allowed into the main body.
+          await sendReasoningTextUpdate({
+            ...resolveTarget(),
+            text,
             append: false,
-            final: false,
           });
         } catch (err) {
           error(`[PARTIAL-REPLY] Failed to send:`, err);
