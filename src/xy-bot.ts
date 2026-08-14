@@ -67,6 +67,27 @@ export function shouldUseLegacyXYSteerDispatch(params: {
 }
 
 /**
+ * Turn a short steer interruption into an explicit extension of the active
+ * request. Without this framing, prompts such as "还有娱乐新闻" can be treated
+ * as a replacement and make the restarted model call forget the sports-news
+ * portion that was already being processed.
+ */
+export function buildXYAgentInputText(params: {
+  text: string;
+  steerContinuation: boolean;
+}): string {
+  if (!params.steerContinuation || !params.text.trim()) {
+    return params.text;
+  }
+
+  return [
+    "这是对当前正在处理请求的补充要求。请保留原请求的目标和已获得的信息，将新增要求一起纳入当前任务，并重新生成一份统一、完整的最终答复。不要只回答新增要求，也不要把两段独立答案机械拼接。",
+    "",
+    `新增要求：${params.text}`,
+  ].join("\n");
+}
+
+/**
  * Handle an incoming A2A message.
  * This is the main entry point for message processing.
  * Runtime is expected to be validated before calling this function.
@@ -189,6 +210,7 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
     // acknowledgement must not complete that task; the asynchronous exec
     // result will close it through the pending-approval delivery path.
     const approvalContinuation = isPendingXYApprovalCommand(parsed.sessionId, text);
+    const configuredQueueMode = resolveXYConfiguredQueueMode(cfg);
     const turnHandle = approvalContinuation
       ? undefined
       : registerXYTurn(
@@ -199,8 +221,17 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
             messageId: parsed.messageId,
           },
           params.inboundMessageId ?? buildXYInboundMessageId(message),
-          resolveXYConfiguredQueueMode(cfg) === "steer",
+          configuredQueueMode === "steer",
         );
+    const steerContinuation = Boolean(
+      turnHandle &&
+        configuredQueueMode === "steer" &&
+        hasXYTurnParent(turnHandle),
+    );
+    const agentInputText = buildXYAgentInputText({
+      text,
+      steerContinuation,
+    });
 
     // Download files if present (using core's media download)
     const mediaList = await downloadFilesFromParts(fileParts);
@@ -212,7 +243,7 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
     const envelopeOptions = core.channel.reply.resolveEnvelopeFormatOptions(cfg);
 
     // Build message body with speaker prefix (following feishu pattern)
-    let messageBody = text || "";
+    let messageBody = agentInputText || "";
 
     // Add speaker prefix for clarity
     const speaker = parsed.sessionId;
@@ -285,7 +316,6 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
     // Dispatch to OpenClaw core using correct API (following feishu pattern)
     log(`[BOT] 🚀 Starting dispatcher with session: ${route.sessionKey}`);
 
-    const configuredQueueMode = resolveXYConfiguredQueueMode(cfg);
     const useLegacySteerDispatch = shouldUseLegacyXYSteerDispatch({
       hostVersion: core.version,
       hasParentTurn: Boolean(turnHandle && hasXYTurnParent(turnHandle)),

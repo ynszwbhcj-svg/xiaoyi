@@ -67,6 +67,23 @@ export function shouldAdoptXYSteerTurn(params: {
 }
 
 /**
+ * Use the last model call as the authoritative answer. A steer can interrupt
+ * an earlier model call; concatenating that abandoned text with the restarted
+ * call produces two adjacent answers instead of one model-authored fusion.
+ */
+export function resolveXYFinalReplyText(params: {
+  finalReplyText: string;
+  currentModelText: string;
+  lastDeliveredText: string;
+}): string {
+  return (
+    params.finalReplyText ||
+    params.currentModelText ||
+    params.lastDeliveredText
+  );
+}
+
+/**
  * Create a reply dispatcher for XY channel messages.
  * Ported streaming improvements from xy_channel:
  * - processingLock: serialized promise chain to prevent concurrent WebSocket sends
@@ -121,7 +138,7 @@ export function createXYReplyDispatcher(
   let hasSentResponse = false;
   let finalSent = false;
   let finalizationStarted = false;
-  let accumulatedText = "";
+  let lastDeliveredText = "";
   let agentRunStarted = false;
   let turnAdopted = false;
   let approvalPending = false;
@@ -219,10 +236,12 @@ export function createXYReplyDispatcher(
             return;
           }
 
-          // onPartialReply handles streaming; deliver just accumulates for fallback
-          accumulatedText += text;
+          // onPartialReply handles streaming. Keep only the latest delivered
+          // reply as a fallback because earlier model calls may have been
+          // interrupted by steer and must not be appended to the final answer.
+          lastDeliveredText = text;
           hasSentResponse = true;
-          log(`[DELIVER ACCUMULATE] Accumulated text, current length=${accumulatedText.length}`);
+          log(`[DELIVER FALLBACK] Captured latest text, length=${lastDeliveredText.length}`);
         } catch (deliverError) {
           error(`Failed to deliver message:`, deliverError);
         }
@@ -278,14 +297,13 @@ export function createXYReplyDispatcher(
             // Wait for in-flight onPartialReply to complete
             await processingLock;
 
-            // Resolve final text: prefer canonical finalReplyText from deliver(kind: "final")
-            let resolvedLastModelText = currentModelText;
-            if (finalReplyText) {
-              resolvedLastModelText = finalReplyText;
-            }
-
-            const sep = prevModelText ? "\n" : "";
-            const fullFinalText = prevModelText + sep + resolvedLastModelText;
+            // The final frame must be authored by the last model call. Earlier
+            // interrupted text is useful only as transient streaming progress.
+            const fullFinalText = resolveXYFinalReplyText({
+              finalReplyText,
+              currentModelText,
+              lastDeliveredText,
+            });
 
             // Reset for next turn
             prevModelText = "";

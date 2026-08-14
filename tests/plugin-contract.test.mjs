@@ -4,9 +4,13 @@ import test from "node:test";
 import pluginDefinition from "../dist/index.js";
 import { xiaoyiPlugin } from "../dist/channel.js";
 import { createXYMessageRunner } from "../dist/xy-message-runner.js";
-import { shouldUseLegacyXYSteerDispatch } from "../dist/xy-bot.js";
+import {
+  buildXYAgentInputText,
+  shouldUseLegacyXYSteerDispatch,
+} from "../dist/xy-bot.js";
 import { buildXYInboundMessageId } from "../dist/xy-parser.js";
 import {
+  resolveXYFinalReplyText,
   resolveXYNoReplyDisposition,
   shouldAdoptXYSteerTurn,
 } from "../dist/xy-reply-dispatcher.js";
@@ -203,6 +207,25 @@ test("uses XiaoYi channel queue mode before global mode and defaults to steer", 
   );
 });
 
+test("frames overlapping steer input as one model-authored fused answer", () => {
+  const fused = buildXYAgentInputText({
+    text: "还有娱乐新闻",
+    steerContinuation: true,
+  });
+  assert.match(fused, /保留原请求/);
+  assert.match(fused, /统一、完整的最终答复/);
+  assert.match(fused, /不要把两段独立答案机械拼接/);
+  assert.match(fused, /新增要求：还有娱乐新闻/);
+
+  assert.equal(
+    buildXYAgentInputText({
+      text: "还有娱乐新闻",
+      steerContinuation: false,
+    }),
+    "还有娱乐新闻",
+  );
+});
+
 test("bypasses legacy dispatch admission only for overlapping steer turns", () => {
   const base = { hasParentTurn: true, configuredQueueMode: "steer" };
   for (const hostVersion of [
@@ -367,6 +390,25 @@ test("distinguishes deferred active-session input from a failed agent run", () =
   assert.equal(
     resolveXYNoReplyDisposition({ agentRunStarted: true }),
     "failed",
+  );
+});
+
+test("uses only the final model call for a steer fusion answer", () => {
+  assert.equal(
+    resolveXYFinalReplyText({
+      finalReplyText: "体育与娱乐新闻的统一汇总",
+      currentModelText: "体育与娱乐新闻的统一汇总",
+      lastDeliveredText: "体育新闻搜索中……",
+    }),
+    "体育与娱乐新闻的统一汇总",
+  );
+  assert.equal(
+    resolveXYFinalReplyText({
+      finalReplyText: "",
+      currentModelText: "模型重新生成的融合答复",
+      lastDeliveredText: "被中断的体育新闻片段",
+    }),
+    "模型重新生成的融合答复",
   );
 });
 
