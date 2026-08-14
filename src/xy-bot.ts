@@ -302,6 +302,7 @@ export async function handleXYMessage(params: HandleXYMessageParams): Promise<vo
       taskId: parsed.taskId,
       messageId: parsed.messageId,
       accountId: route.accountId,  // ✅ Use route.accountId
+      deviceId: message.deviceId,
       approvalContinuation,
       turnHandle,
     });

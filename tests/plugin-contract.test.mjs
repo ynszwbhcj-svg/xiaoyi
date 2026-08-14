@@ -11,7 +11,9 @@ import {
 import { buildXYInboundMessageId } from "../dist/xy-parser.js";
 import { buildA2AReasoningTextPart } from "../dist/xy-formatter.js";
 import {
+  buildXYVisibleProgressText,
   buildXYApprovalDelivery,
+  resolveXYApprovalDeliveryMode,
   resolveXYFinalReplyText,
   resolveXYNoReplyDisposition,
   shouldAdoptXYSteerTurn,
@@ -418,6 +420,21 @@ test("maps public partial output to XiaoYi reasoningText", () => {
   });
 });
 
+test("shows safe progress notices without exposing private reasoning", () => {
+  const privateReasoning = "secret chain of thought";
+  const notice = buildXYVisibleProgressText({ kind: "analysis" });
+  assert.equal(notice, "模型正在分析问题并规划处理步骤…");
+  assert.equal(notice.includes(privateReasoning), false);
+  assert.equal(
+    buildXYVisibleProgressText({ kind: "tool-start", toolName: "web_search" }),
+    "正在使用工具：web_search…",
+  );
+  assert.equal(
+    buildXYVisibleProgressText({ kind: "tool-result" }),
+    "工具执行完成，正在整理结果…",
+  );
+});
+
 test("adopts only a turn accepted by an existing run as steer", () => {
   assert.equal(
     shouldAdoptXYSteerTurn({ agentRunStarted: false, turnAdopted: true }),
@@ -531,14 +548,29 @@ test("recognizes and renders manual approval commands", () => {
     ].join("\n\n"),
   });
   assert.equal(normalizedPrompt, prompt);
-  assert.deepEqual(buildXYApprovalDelivery(prompt), {
+  assert.equal(
+    resolveXYApprovalDeliveryMode("5fc96162-1c0a-cda5-6b83-4ebbc646549c"),
+    "artifact",
+  );
+  assert.equal(
+    resolveXYApprovalDeliveryMode("ODkwMDg2MjAwMTAyMzY1MTE5hwvdpwisoper"),
+    "status",
+  );
+  assert.deepEqual(buildXYApprovalDelivery(prompt, "artifact"), {
     artifact: {
       text: prompt,
       append: false,
       final: false,
     },
     status: {
-      text: "等待你的确认，请从上方代码块复制审批命令。",
+      text: "",
+      state: "input-required",
+    },
+  });
+  assert.deepEqual(buildXYApprovalDelivery(prompt, "status"), {
+    artifact: null,
+    status: {
+      text: prompt,
       state: "input-required",
     },
   });

@@ -41,6 +41,7 @@ export interface CreateXYReplyDispatcherParams {
   taskId: string;
   messageId: string;
   accountId: string;
+  deviceId?: string;
   approvalContinuation?: boolean;
   turnHandle?: XYTurnHandle;
 }
@@ -84,15 +85,51 @@ export function resolveXYFinalReplyText(params: {
   return params.finalReplyText;
 }
 
-export function buildXYApprovalDelivery(promptText: string) {
+export function buildXYVisibleProgressText(params:
+  | { kind: "analysis" }
+  | { kind: "tool-start"; toolName?: string }
+  | { kind: "tool-result" }
+): string {
+  if (params.kind === "analysis") {
+    return "模型正在分析问题并规划处理步骤…";
+  }
+  if (params.kind === "tool-result") {
+    return "工具执行完成，正在整理结果…";
+  }
+
+  const toolName = params.toolName?.trim().slice(0, 80) || "unknown";
+  return `正在使用工具：${toolName}…`;
+}
+
+export type XYApprovalDeliveryMode = "artifact" | "status";
+
+export function resolveXYApprovalDeliveryMode(deviceId?: string): XYApprovalDeliveryMode {
+  if (!deviceId?.trim()) {
+    return "artifact";
+  }
+
+  // XiaoYi mobile currently sends a UUID device id, while desktop sends an
+  // opaque non-UUID id. The protocol has no separate platform field.
+  const uuidDeviceId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return uuidDeviceId.test(deviceId.trim()) ? "artifact" : "status";
+}
+
+export function buildXYApprovalDelivery(
+  promptText: string,
+  mode: XYApprovalDeliveryMode = "artifact",
+) {
   return {
-    artifact: {
-      text: promptText,
-      append: false,
-      final: false,
-    },
+    artifact: mode === "artifact"
+      ? {
+          text: promptText,
+          append: false,
+          final: false,
+        }
+      : null,
     status: {
-      text: "等待你的确认，请从上方代码块复制审批命令。",
+      // Keep only one visible copy. Desktop renders the status as its dialog;
+      // mobile renders the standalone artifact and needs only the task state.
+      text: mode === "status" ? promptText : "",
       state: "input-required" as const,
     },
   };
@@ -114,6 +151,7 @@ export function createXYReplyDispatcher(
     taskId,
     messageId,
     accountId,
+    deviceId,
     approvalContinuation = false,
     turnHandle,
   } = params;
@@ -162,6 +200,33 @@ export function createXYReplyDispatcher(
   // Streaming state (ported from xy_channel)
   let processingLock: Promise<void> = Promise.resolve();
   let finalReplyText = "";
+  let analysisProgressSent = false;
+
+  const sendVisibleProgress = async (text: string): Promise<void> => {
+    if (!text.trim() || config.enableStreaming === false) {
+      return;
+    }
+
+    const prevLock = processingLock;
+    let releaseLock: () => void;
+    processingLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+
+    try {
+      await prevLock;
+      if (approvalContinuation || approvalPending) {
+        return;
+      }
+      await sendReasoningTextUpdate({
+        ...resolveTarget(),
+        text,
+        append: false,
+      });
+    } finally {
+      releaseLock!();
+    }
+  };
 
   const startStatusInterval = () => {
     log(`[STATUS INTERVAL] Starting interval for session ${sessionId}`);
@@ -211,9 +276,10 @@ export function createXYReplyDispatcher(
     try {
       const delivery = buildXYApprovalDelivery(
         approvalPromptText || "任务等待授权，请输入 /approve 命令。",
+        resolveXYApprovalDeliveryMode(deviceId),
       );
       const target = resolveTarget();
-      if (!approvalArtifactSent) {
+      if (!approvalArtifactSent && delivery.artifact) {
         await sendResponse(target, delivery.artifact);
         approvalArtifactSent = true;
       }
@@ -449,10 +515,10 @@ export function createXYReplyDispatcher(
         if (phase === "start") {
           const toolName = name || "unknown";
           try {
-            await sendStatus(resolveTarget(), {
-              text: `正在使用工具: ${toolName}...`,
-              state: "working",
-            });
+            await sendVisibleProgress(buildXYVisibleProgressText({
+              kind: "tool-start",
+              toolName,
+            }));
           } catch (err) {
             error(`[TOOL START] Failed to send tool start status:`, err);
           }
@@ -474,11 +540,7 @@ export function createXYReplyDispatcher(
               await sendApprovalStatusOnce();
               return;
             }
-            const resultText = text.length > 0 ? text : "工具执行完成";
-            await sendStatus(resolveTarget(), {
-              text: resultText,
-              state: "working",
-            });
+            await sendVisibleProgress(buildXYVisibleProgressText({ kind: "tool-result" }));
           }
         } catch (err) {
           error(`[TOOL RESULT] Failed to send tool result status:`, err);
@@ -487,10 +549,20 @@ export function createXYReplyDispatcher(
 
       // Reasoning/thinking process streaming callback
       onReasoningStream: async (payload: ReplyPayload) => {
-        // This callback carries private model reasoning. Never forward it to
-        // XiaoYi; visible progress comes exclusively from onPartialReply.
+        // This callback carries private model reasoning. Surface only a
+        // generic lifecycle notice, never the private payload itself.
         const text = payload.text ?? "";
-        log(`[REASONING STREAM] Received but not forwarded, length=${text.length}`);
+        log(`[REASONING STREAM] Received private stream, length=${text.length}`);
+        if (analysisProgressSent || text.length === 0) {
+          return;
+        }
+        analysisProgressSent = true;
+        try {
+          await sendVisibleProgress(buildXYVisibleProgressText({ kind: "analysis" }));
+        } catch (err) {
+          analysisProgressSent = false;
+          error(`[REASONING STREAM] Failed to send public progress notice:`, err);
+        }
       },
 
       // Partial reply streaming callback (real-time text streaming)
@@ -501,36 +573,13 @@ export function createXYReplyDispatcher(
         markApprovalPending({ text });
         hasSentResponse = true;
 
-        // Serialized promise chain to prevent concurrent sends
-        const prevLock = processingLock;
-        let releaseLock: () => void;
-        processingLock = new Promise<void>((resolve) => {
-          releaseLock = resolve;
-        });
-
         try {
-          await prevLock;
-
-          if (approvalContinuation || approvalPending) {
-            return;
-          }
-
-          if (config.enableStreaming === false) {
-            return;
-          }
-
           // OpenClaw 2026.6 and 2026.7 both surface tool narration and search
           // progress through partial replies. Keep it in XiaoYi's progress
           // area; only deliver(kind="final") is allowed into the main body.
-          await sendReasoningTextUpdate({
-            ...resolveTarget(),
-            text,
-            append: false,
-          });
+          await sendVisibleProgress(text);
         } catch (err) {
           error(`[PARTIAL-REPLY] Failed to send:`, err);
-        } finally {
-          releaseLock!();
         }
       },
     } as GetReplyOptions & {
