@@ -11,6 +11,7 @@ import {
 import { buildXYInboundMessageId } from "../dist/xy-parser.js";
 import { buildA2AReasoningTextPart } from "../dist/xy-formatter.js";
 import {
+  buildXYApprovalDelivery,
   resolveXYFinalReplyText,
   resolveXYNoReplyDisposition,
   shouldAdoptXYSteerTurn,
@@ -37,6 +38,7 @@ import {
   isPendingXYApprovalText,
   pendingXYApprovalCount,
   registerPendingXYApproval,
+  resolveXYApprovalPrompt,
 } from "../dist/xy-approval-manager.js";
 import {
   getLatestSessionContext,
@@ -445,21 +447,30 @@ test("tracks an exec approval task until its asynchronous result is delivered", 
 
   const statuses = [];
   const responses = [];
+  const deliveryOrder = [];
   const result = await deliverPendingXYApprovalText({
     sessionId: "approval-session",
     text: "command completed",
     dependencies: {
-      sendStatus: async (payload) => statuses.push(payload),
-      sendResponse: async (payload) => responses.push(payload),
+      sendStatus: async (payload) => {
+        deliveryOrder.push("status");
+        statuses.push(payload);
+      },
+      sendResponse: async (payload) => {
+        deliveryOrder.push("artifact");
+        responses.push(payload);
+      },
     },
   });
 
   assert.equal(result?.meta?.delivery, "a2a-approval-followup");
   assert.equal(statuses.length, 1);
   assert.equal(statuses[0].state, "completed");
+  assert.equal(statuses[0].final, true);
   assert.equal(responses.length, 1);
   assert.equal(responses[0].text, "command completed");
-  assert.equal(responses[0].final, true);
+  assert.equal(responses[0].final, false);
+  assert.deepEqual(deliveryOrder, ["artifact", "status"]);
   assert.equal(getPendingXYApproval("approval-session"), null);
 });
 
@@ -497,8 +508,40 @@ test("recognizes and renders manual approval commands", () => {
     approvalSlug: "abc123",
     command: "echo ok",
   });
-  assert.match(prompt, /\/approve abc123 allow-once/);
-  assert.match(prompt, /\/approve abc123 deny/);
+  assert.equal(
+    prompt,
+    [
+      "执行该命令需要你的确认。",
+      "待执行命令：\n\n```sh\necho ok\n```",
+      "允许本次执行：\n\n```\n/approve abc123 allow-once\n```",
+      "始终允许执行：\n\n```\n/approve abc123 allow-always\n```",
+      "拒绝执行：\n\n```\n/approve abc123 deny\n```",
+    ].join("\n\n"),
+  );
+
+  const normalizedPrompt = resolveXYApprovalPrompt({
+    text: [
+      "Approval required.",
+      "Run:",
+      "```txt\n/approve abc123 allow-once\n```",
+      "Pending command:",
+      "```sh\necho ok\n```",
+      "Other options:",
+      "```txt\n/approve abc123 allow-always\n/approve abc123 deny\n```",
+    ].join("\n\n"),
+  });
+  assert.equal(normalizedPrompt, prompt);
+  assert.deepEqual(buildXYApprovalDelivery(prompt), {
+    artifact: {
+      text: prompt,
+      append: false,
+      final: false,
+    },
+    status: {
+      text: "等待你的确认，请从上方代码块复制审批命令。",
+      state: "input-required",
+    },
+  });
   assert.equal(
     isPendingXYApprovalText("Approval required. Reply with: /approve abc123 allow-once"),
     true,

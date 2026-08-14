@@ -14,11 +14,11 @@ import {
 import { resolveXYConfig } from "./xy-config.js";
 import type { XiaoYiChannelConfig } from "./types.js";
 import {
-  buildXYApprovalPrompt,
   extractXYApprovalCommand,
   isPendingXYApprovalEvent,
   isPendingXYApprovalText,
   registerPendingXYApproval,
+  resolveXYApprovalPrompt,
   type XYApprovalEvent,
 } from "./xy-approval-manager.js";
 import { configManager } from "./xy-utils/config-manager.js";
@@ -84,6 +84,20 @@ export function resolveXYFinalReplyText(params: {
   return params.finalReplyText;
 }
 
+export function buildXYApprovalDelivery(promptText: string) {
+  return {
+    artifact: {
+      text: promptText,
+      append: false,
+      final: false,
+    },
+    status: {
+      text: "等待你的确认，请从上方代码块复制审批命令。",
+      state: "input-required" as const,
+    },
+  };
+}
+
 /**
  * Create a reply dispatcher for XY channel messages.
  * Ported streaming improvements from xy_channel:
@@ -143,6 +157,7 @@ export function createXYReplyDispatcher(
   let approvalPending = false;
   let approvalPromptText = "";
   let approvalStatusSent = false;
+  let approvalArtifactSent = false;
 
   // Streaming state (ported from xy_channel)
   let processingLock: Promise<void> = Promise.resolve();
@@ -175,7 +190,7 @@ export function createXYReplyDispatcher(
 
     approvalPending = true;
     stopStatusInterval();
-    approvalPromptText = params.text?.trim() || buildXYApprovalPrompt(params);
+    approvalPromptText = resolveXYApprovalPrompt(params);
     registerPendingXYApproval({
       config,
       sessionId,
@@ -194,10 +209,15 @@ export function createXYReplyDispatcher(
     }
     approvalStatusSent = true;
     try {
-      await sendStatus(resolveTarget(), {
-        text: approvalPromptText || "任务等待授权，请输入 /approve 命令。",
-        state: "input-required",
-      });
+      const delivery = buildXYApprovalDelivery(
+        approvalPromptText || "任务等待授权，请输入 /approve 命令。",
+      );
+      const target = resolveTarget();
+      if (!approvalArtifactSent) {
+        await sendResponse(target, delivery.artifact);
+        approvalArtifactSent = true;
+      }
+      await sendStatus(target, delivery.status);
     } catch (err) {
       approvalStatusSent = false;
       throw err;

@@ -64,25 +64,83 @@ export function isPendingXYApprovalText(text: string | undefined): boolean {
   return Boolean(extractXYApprovalCommand(text) && text && APPROVAL_PENDING_TEXT_PATTERN.test(text));
 }
 
+function buildMarkdownCodeBlock(text: string, language = ""): string {
+  const longestBacktickRun = Math.max(
+    0,
+    ...Array.from(text.matchAll(/`+/g), (match) => match[0].length),
+  );
+  const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
+  return `${fence}${language}\n${text}\n${fence}`;
+}
+
+function extractXYApprovalPendingCommand(text: string | undefined): string | undefined {
+  if (!text) {
+    return undefined;
+  }
+
+  const standardPendingCommand = text.match(
+    /(?:pending command|待执行命令)\s*[:：]\s*\n+(`{3,})[^\n]*\n([\s\S]*?)\n\1/i,
+  )?.[2]?.trim();
+  if (standardPendingCommand) {
+    return standardPendingCommand;
+  }
+
+  for (const match of text.matchAll(/```[^\n]*\n([\s\S]*?)```/g)) {
+    const blockText = match[1]?.trim();
+    if (blockText && !extractXYApprovalCommand(blockText)) {
+      return blockText;
+    }
+  }
+
+  return text
+    .match(/(?:pending command|待执行命令)\s*[:：]\s*([^\n]+)/i)?.[1]
+    ?.trim();
+}
+
 export function buildXYApprovalPrompt(params: {
   approvalId?: string;
   approvalSlug?: string;
   command?: string;
   message?: string;
 }): string {
-  const approvalRef = params.approvalSlug || params.approvalId;
+  const approvalRef = (params.approvalSlug || params.approvalId)
+    ?.trim()
+    .replace(/^`+|`+$/g, "");
   const lines = [params.message?.trim() || "执行该命令需要你的确认。"];
 
   if (params.command?.trim()) {
-    lines.push(`待执行命令：${params.command.trim()}`);
+    lines.push(`待执行命令：\n\n${buildMarkdownCodeBlock(params.command.trim(), "sh")}`);
   }
   if (approvalRef) {
-    lines.push(`允许本次执行：/approve ${approvalRef} allow-once`);
-    lines.push(`拒绝执行：/approve ${approvalRef} deny`);
+    lines.push(
+      `允许本次执行：\n\n${buildMarkdownCodeBlock(`/approve ${approvalRef} allow-once`)}`,
+    );
+    lines.push(
+      `始终允许执行：\n\n${buildMarkdownCodeBlock(`/approve ${approvalRef} allow-always`)}`,
+    );
+    lines.push(`拒绝执行：\n\n${buildMarkdownCodeBlock(`/approve ${approvalRef} deny`)}`);
   } else {
     lines.push("请使用 OpenClaw 返回的 /approve 命令完成确认。");
   }
   return lines.join("\n\n");
+}
+
+export function resolveXYApprovalPrompt(
+  params: XYApprovalEvent & { text?: string },
+): string {
+  const rawText = params.text?.trim();
+  const parsedCommand = extractXYApprovalCommand(rawText);
+  const approvalRef = params.approvalSlug || params.approvalId || parsedCommand?.approvalRef;
+
+  if (!approvalRef) {
+    return rawText || buildXYApprovalPrompt(params);
+  }
+
+  return buildXYApprovalPrompt({
+    approvalSlug: approvalRef,
+    command: params.command?.trim() || extractXYApprovalPendingCommand(rawText),
+    message: params.message,
+  });
 }
 
 export function registerPendingXYApproval(
