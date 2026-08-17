@@ -4,9 +4,17 @@ import test from "node:test";
 import pluginDefinition from "../dist/index.js";
 import { xiaoyiPlugin } from "../dist/channel.js";
 import { createXYMessageRunner } from "../dist/xy-message-runner.js";
-import { shouldUseLegacyXYSteerDispatch } from "../dist/xy-bot.js";
-import { buildXYInboundMessageId } from "../dist/xy-parser.js";
 import {
+  buildXYAgentInputText,
+  shouldUseLegacyXYSteerDispatch,
+} from "../dist/xy-bot.js";
+import { buildXYInboundMessageId } from "../dist/xy-parser.js";
+import { buildA2AReasoningTextPart } from "../dist/xy-formatter.js";
+import {
+  buildXYVisibleProgressText,
+  buildXYApprovalDelivery,
+  resolveXYApprovalDeliveryMode,
+  resolveXYFinalReplyText,
   resolveXYNoReplyDisposition,
   shouldAdoptXYSteerTurn,
 } from "../dist/xy-reply-dispatcher.js";
@@ -32,6 +40,7 @@ import {
   isPendingXYApprovalText,
   pendingXYApprovalCount,
   registerPendingXYApproval,
+  resolveXYApprovalPrompt,
 } from "../dist/xy-approval-manager.js";
 import {
   getLatestSessionContext,
@@ -203,6 +212,25 @@ test("uses XiaoYi channel queue mode before global mode and defaults to steer", 
   );
 });
 
+test("frames overlapping steer input as one model-authored fused answer", () => {
+  const fused = buildXYAgentInputText({
+    text: "还有娱乐新闻",
+    steerContinuation: true,
+  });
+  assert.match(fused, /保留原请求/);
+  assert.match(fused, /统一、完整的最终答复/);
+  assert.match(fused, /不要把两段独立答案机械拼接/);
+  assert.match(fused, /新增要求：还有娱乐新闻/);
+
+  assert.equal(
+    buildXYAgentInputText({
+      text: "还有娱乐新闻",
+      steerContinuation: false,
+    }),
+    "还有娱乐新闻",
+  );
+});
+
 test("bypasses legacy dispatch admission only for overlapping steer turns", () => {
   const base = { hasParentTurn: true, configuredQueueMode: "steer" };
   for (const hostVersion of [
@@ -370,6 +398,43 @@ test("distinguishes deferred active-session input from a failed agent run", () =
   );
 });
 
+test("uses only OpenClaw's canonical final frame for the answer body", () => {
+  assert.equal(
+    resolveXYFinalReplyText({
+      finalReplyText: "体育与娱乐新闻的统一汇总",
+    }),
+    "体育与娱乐新闻的统一汇总",
+  );
+  assert.equal(
+    resolveXYFinalReplyText({
+      finalReplyText: "",
+    }),
+    "",
+  );
+});
+
+test("maps public partial output to XiaoYi reasoningText", () => {
+  assert.deepEqual(buildA2AReasoningTextPart("正在搜索体育新闻"), {
+    kind: "reasoningText",
+    reasoningText: "正在搜索体育新闻",
+  });
+});
+
+test("shows safe progress notices without exposing private reasoning", () => {
+  const privateReasoning = "secret chain of thought";
+  const notice = buildXYVisibleProgressText({ kind: "analysis" });
+  assert.equal(notice, "模型正在分析问题并规划处理步骤…");
+  assert.equal(notice.includes(privateReasoning), false);
+  assert.equal(
+    buildXYVisibleProgressText({ kind: "tool-start", toolName: "web_search" }),
+    "正在使用工具：web_search…",
+  );
+  assert.equal(
+    buildXYVisibleProgressText({ kind: "tool-result" }),
+    "工具执行完成，正在整理结果…",
+  );
+});
+
 test("adopts only a turn accepted by an existing run as steer", () => {
   assert.equal(
     shouldAdoptXYSteerTurn({ agentRunStarted: false, turnAdopted: true }),
@@ -399,21 +464,30 @@ test("tracks an exec approval task until its asynchronous result is delivered", 
 
   const statuses = [];
   const responses = [];
+  const deliveryOrder = [];
   const result = await deliverPendingXYApprovalText({
     sessionId: "approval-session",
     text: "command completed",
     dependencies: {
-      sendStatus: async (payload) => statuses.push(payload),
-      sendResponse: async (payload) => responses.push(payload),
+      sendStatus: async (payload) => {
+        deliveryOrder.push("status");
+        statuses.push(payload);
+      },
+      sendResponse: async (payload) => {
+        deliveryOrder.push("artifact");
+        responses.push(payload);
+      },
     },
   });
 
   assert.equal(result?.meta?.delivery, "a2a-approval-followup");
   assert.equal(statuses.length, 1);
   assert.equal(statuses[0].state, "completed");
+  assert.equal(statuses[0].final, true);
   assert.equal(responses.length, 1);
   assert.equal(responses[0].text, "command completed");
-  assert.equal(responses[0].final, true);
+  assert.equal(responses[0].final, false);
+  assert.deepEqual(deliveryOrder, ["artifact", "status"]);
   assert.equal(getPendingXYApproval("approval-session"), null);
 });
 
@@ -451,8 +525,55 @@ test("recognizes and renders manual approval commands", () => {
     approvalSlug: "abc123",
     command: "echo ok",
   });
-  assert.match(prompt, /\/approve abc123 allow-once/);
-  assert.match(prompt, /\/approve abc123 deny/);
+  assert.equal(
+    prompt,
+    [
+      "执行该命令需要你的确认。",
+      "待执行命令：\n\n```sh\necho ok\n```",
+      "允许本次执行：\n\n```\n/approve abc123 allow-once\n```",
+      "始终允许执行：\n\n```\n/approve abc123 allow-always\n```",
+      "拒绝执行：\n\n```\n/approve abc123 deny\n```",
+    ].join("\n\n"),
+  );
+
+  const normalizedPrompt = resolveXYApprovalPrompt({
+    text: [
+      "Approval required.",
+      "Run:",
+      "```txt\n/approve abc123 allow-once\n```",
+      "Pending command:",
+      "```sh\necho ok\n```",
+      "Other options:",
+      "```txt\n/approve abc123 allow-always\n/approve abc123 deny\n```",
+    ].join("\n\n"),
+  });
+  assert.equal(normalizedPrompt, prompt);
+  assert.equal(
+    resolveXYApprovalDeliveryMode("5fc96162-1c0a-cda5-6b83-4ebbc646549c"),
+    "artifact",
+  );
+  assert.equal(
+    resolveXYApprovalDeliveryMode("ODkwMDg2MjAwMTAyMzY1MTE5hwvdpwisoper"),
+    "status",
+  );
+  assert.deepEqual(buildXYApprovalDelivery(prompt, "artifact"), {
+    artifact: {
+      text: prompt,
+      append: false,
+      final: false,
+    },
+    status: {
+      text: "",
+      state: "input-required",
+    },
+  });
+  assert.deepEqual(buildXYApprovalDelivery(prompt, "status"), {
+    artifact: null,
+    status: {
+      text: prompt,
+      state: "input-required",
+    },
+  });
   assert.equal(
     isPendingXYApprovalText("Approval required. Reply with: /approve abc123 allow-once"),
     true,

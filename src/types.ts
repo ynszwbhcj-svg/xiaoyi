@@ -10,6 +10,7 @@ export interface A2AJsonRpcRequest {
   method: string;
   params: A2ARequestParams;
   id: string;
+  deviceId?: string;
 }
 
 export interface A2ARequestParams {

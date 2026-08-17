@@ -32,14 +32,9 @@ export async function deliverPendingXYApprovalText(params: {
 
   const dependencies = params.dependencies ?? defaultDependencies;
 
-  await dependencies.sendStatus({
-    config: pending.config,
-    sessionId: pending.sessionId,
-    taskId: pending.taskId,
-    messageId: pending.messageId,
-    text: "任务处理已完成~",
-    state: "completed",
-  });
+  // Deliver the result before the terminal status. XiaoYi mobile keeps the
+  // live task in "working" when it receives completed with final=false, and
+  // may ignore content sent after a terminal event.
   await dependencies.sendResponse({
     config: pending.config,
     sessionId: pending.sessionId,
@@ -47,6 +42,15 @@ export async function deliverPendingXYApprovalText(params: {
     messageId: pending.messageId,
     text: params.text,
     append: false,
+    final: false,
+  });
+  await dependencies.sendStatus({
+    config: pending.config,
+    sessionId: pending.sessionId,
+    taskId: pending.taskId,
+    messageId: pending.messageId,
+    text: "任务处理已完成~",
+    state: "completed",
     final: true,
   });
 

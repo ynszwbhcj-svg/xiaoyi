@@ -109,10 +109,17 @@ export interface SendReasoningTextUpdateParams {
   append?: boolean; // defaults to true
 }
 
+export function buildA2AReasoningTextPart(text: string) {
+  return {
+    kind: "reasoningText" as const,
+    reasoningText: text,
+  };
+}
+
 /**
  * Send an A2A artifact-update with reasoningText part.
- * Used for onToolStart, onToolResult, onReasoningStream, onReasoningEnd, onPartialReply.
- * append=true, final=false, lastChunk=true, text is suffixed with newline for markdown rendering.
+ * Used for public intermediate model output such as onPartialReply. Private
+ * model reasoning is intentionally never passed to this formatter.
  */
 export async function sendReasoningTextUpdate(params: SendReasoningTextUpdateParams): Promise<void> {
   const { config, sessionId, taskId, messageId, text, append = true } = params;
@@ -128,10 +135,7 @@ export async function sendReasoningTextUpdate(params: SendReasoningTextUpdatePar
     artifact: {
       artifactId: uuidv4(),
       parts: [
-        {
-          kind: "reasoningText",
-          reasoningText: text,
-        },
+        buildA2AReasoningTextPart(text),
       ],
     },
   };
@@ -167,6 +171,7 @@ export interface SendStatusUpdateParams {
   messageId: string;
   text: string;
   state: "submitted" | "working" | "input-required" | "completed" | "canceled" | "failed" | "unknown";
+  final?: boolean;
 }
 
 /**
@@ -174,7 +179,7 @@ export interface SendStatusUpdateParams {
  * Follows A2A protocol standard format with nested status object.
  */
 export async function sendStatusUpdate(params: SendStatusUpdateParams): Promise<void> {
-  const { config, sessionId, taskId, messageId, text, state } = params;
+  const { config, sessionId, taskId, messageId, text, state, final = false } = params;
 
   const log = logger.log;
 
@@ -182,7 +187,7 @@ export async function sendStatusUpdate(params: SendStatusUpdateParams): Promise<
   const statusUpdate: A2ATaskStatusUpdateEvent = {
     taskId,
     kind: "status-update",
-    final: false, // Status updates should not end the stream
+    final,
     status: {
       message: {
         role: "agent",
@@ -220,6 +225,7 @@ export async function sendStatusUpdate(params: SendStatusUpdateParams): Promise<
   log(`[A2A_STATUS]   - taskId: ${taskId}`);
   log(`[A2A_STATUS]   - messageId: ${messageId}`);
   log(`[A2A_STATUS]   - state: ${state}`);
+  log(`[A2A_STATUS]   - final: ${final}`);
   log(`[A2A_STATUS]   - text: "${text}"`);
   log(`[A2A_STATUS] 📦 Complete outbound message:`);
   log(JSON.stringify(outboundMessage, null, 2));

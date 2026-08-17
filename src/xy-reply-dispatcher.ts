@@ -6,15 +6,19 @@ import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 import { getXYRuntime } from "./runtime.js";
 
-import { sendA2AResponse, sendStatusUpdate } from "./xy-formatter.js";
+import {
+  sendA2AResponse,
+  sendReasoningTextUpdate,
+  sendStatusUpdate,
+} from "./xy-formatter.js";
 import { resolveXYConfig } from "./xy-config.js";
 import type { XiaoYiChannelConfig } from "./types.js";
 import {
-  buildXYApprovalPrompt,
   extractXYApprovalCommand,
   isPendingXYApprovalEvent,
   isPendingXYApprovalText,
   registerPendingXYApproval,
+  resolveXYApprovalPrompt,
   type XYApprovalEvent,
 } from "./xy-approval-manager.js";
 import { configManager } from "./xy-utils/config-manager.js";
@@ -37,6 +41,7 @@ export interface CreateXYReplyDispatcherParams {
   taskId: string;
   messageId: string;
   accountId: string;
+  deviceId?: string;
   approvalContinuation?: boolean;
   turnHandle?: XYTurnHandle;
 }
@@ -67,10 +72,73 @@ export function shouldAdoptXYSteerTurn(params: {
 }
 
 /**
+ * Use OpenClaw's canonical final frame as the authoritative answer. A steer
+ * can interrupt an earlier model call, so partial and block frames must never
+ * be promoted or concatenated into the XiaoYi response body.
+ */
+export function resolveXYFinalReplyText(params: {
+  finalReplyText: string;
+}): string {
+  // Partial and block replies are progress only. If OpenClaw does not provide
+  // a canonical final frame, returning an empty final is safer than promoting
+  // tool narration or an interrupted model call into the answer body.
+  return params.finalReplyText;
+}
+
+export function buildXYVisibleProgressText(params:
+  | { kind: "analysis" }
+  | { kind: "tool-start"; toolName?: string }
+  | { kind: "tool-result" }
+): string {
+  if (params.kind === "analysis") {
+    return "模型正在分析问题并规划处理步骤…";
+  }
+  if (params.kind === "tool-result") {
+    return "工具执行完成，正在整理结果…";
+  }
+
+  const toolName = params.toolName?.trim().slice(0, 80) || "unknown";
+  return `正在使用工具：${toolName}…`;
+}
+
+export type XYApprovalDeliveryMode = "artifact" | "status";
+
+export function resolveXYApprovalDeliveryMode(deviceId?: string): XYApprovalDeliveryMode {
+  if (!deviceId?.trim()) {
+    return "artifact";
+  }
+
+  // XiaoYi mobile currently sends a UUID device id, while desktop sends an
+  // opaque non-UUID id. The protocol has no separate platform field.
+  const uuidDeviceId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return uuidDeviceId.test(deviceId.trim()) ? "artifact" : "status";
+}
+
+export function buildXYApprovalDelivery(
+  promptText: string,
+  mode: XYApprovalDeliveryMode = "artifact",
+) {
+  return {
+    artifact: mode === "artifact"
+      ? {
+          text: promptText,
+          append: false,
+          final: false,
+        }
+      : null,
+    status: {
+      // Keep only one visible copy. Desktop renders the status as its dialog;
+      // mobile renders the standalone artifact and needs only the task state.
+      text: mode === "status" ? promptText : "",
+      state: "input-required" as const,
+    },
+  };
+}
+
+/**
  * Create a reply dispatcher for XY channel messages.
  * Ported streaming improvements from xy_channel:
  * - processingLock: serialized promise chain to prevent concurrent WebSocket sends
- * - Model-call boundary detection via prevModelText/currentModelText
  * - finalReplyText capture from deliver(kind: "final") for authoritative final frame
  */
 export function createXYReplyDispatcher(
@@ -83,6 +151,7 @@ export function createXYReplyDispatcher(
     taskId,
     messageId,
     accountId,
+    deviceId,
     approvalContinuation = false,
     turnHandle,
   } = params;
@@ -121,18 +190,43 @@ export function createXYReplyDispatcher(
   let hasSentResponse = false;
   let finalSent = false;
   let finalizationStarted = false;
-  let accumulatedText = "";
   let agentRunStarted = false;
   let turnAdopted = false;
   let approvalPending = false;
   let approvalPromptText = "";
   let approvalStatusSent = false;
+  let approvalArtifactSent = false;
 
   // Streaming state (ported from xy_channel)
   let processingLock: Promise<void> = Promise.resolve();
   let finalReplyText = "";
-  let prevModelText = "";
-  let currentModelText = "";
+  let analysisProgressSent = false;
+
+  const sendVisibleProgress = async (text: string): Promise<void> => {
+    if (!text.trim() || config.enableStreaming === false) {
+      return;
+    }
+
+    const prevLock = processingLock;
+    let releaseLock: () => void;
+    processingLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+
+    try {
+      await prevLock;
+      if (approvalContinuation || approvalPending) {
+        return;
+      }
+      await sendReasoningTextUpdate({
+        ...resolveTarget(),
+        text,
+        append: false,
+      });
+    } finally {
+      releaseLock!();
+    }
+  };
 
   const startStatusInterval = () => {
     log(`[STATUS INTERVAL] Starting interval for session ${sessionId}`);
@@ -161,7 +255,7 @@ export function createXYReplyDispatcher(
 
     approvalPending = true;
     stopStatusInterval();
-    approvalPromptText = params.text?.trim() || buildXYApprovalPrompt(params);
+    approvalPromptText = resolveXYApprovalPrompt(params);
     registerPendingXYApproval({
       config,
       sessionId,
@@ -180,10 +274,16 @@ export function createXYReplyDispatcher(
     }
     approvalStatusSent = true;
     try {
-      await sendStatus(resolveTarget(), {
-        text: approvalPromptText || "任务等待授权，请输入 /approve 命令。",
-        state: "input-required",
-      });
+      const delivery = buildXYApprovalDelivery(
+        approvalPromptText || "任务等待授权，请输入 /approve 命令。",
+        resolveXYApprovalDeliveryMode(deviceId),
+      );
+      const target = resolveTarget();
+      if (!approvalArtifactSent && delivery.artifact) {
+        await sendResponse(target, delivery.artifact);
+        approvalArtifactSent = true;
+      }
+      await sendStatus(target, delivery.status);
     } catch (err) {
       approvalStatusSent = false;
       throw err;
@@ -219,10 +319,10 @@ export function createXYReplyDispatcher(
             return;
           }
 
-          // onPartialReply handles streaming; deliver just accumulates for fallback
-          accumulatedText += text;
+          // onPartialReply handles visible progress. Non-final deliver frames
+          // are observed only for lifecycle tracking and never become body text.
           hasSentResponse = true;
-          log(`[DELIVER ACCUMULATE] Accumulated text, current length=${accumulatedText.length}`);
+          log(`[DELIVER] Observed non-empty frame, length=${text.length}`);
         } catch (deliverError) {
           error(`Failed to deliver message:`, deliverError);
         }
@@ -278,18 +378,11 @@ export function createXYReplyDispatcher(
             // Wait for in-flight onPartialReply to complete
             await processingLock;
 
-            // Resolve final text: prefer canonical finalReplyText from deliver(kind: "final")
-            let resolvedLastModelText = currentModelText;
-            if (finalReplyText) {
-              resolvedLastModelText = finalReplyText;
-            }
-
-            const sep = prevModelText ? "\n" : "";
-            const fullFinalText = prevModelText + sep + resolvedLastModelText;
-
-            // Reset for next turn
-            prevModelText = "";
-            currentModelText = "";
+            // The final frame must be authored by the last model call. Earlier
+            // interrupted text is useful only as transient streaming progress.
+            const fullFinalText = resolveXYFinalReplyText({
+              finalReplyText,
+            });
 
             if (turnHandle) {
               await settleXYTurnTarget(turnHandle);
@@ -422,10 +515,10 @@ export function createXYReplyDispatcher(
         if (phase === "start") {
           const toolName = name || "unknown";
           try {
-            await sendStatus(resolveTarget(), {
-              text: `正在使用工具: ${toolName}...`,
-              state: "working",
-            });
+            await sendVisibleProgress(buildXYVisibleProgressText({
+              kind: "tool-start",
+              toolName,
+            }));
           } catch (err) {
             error(`[TOOL START] Failed to send tool start status:`, err);
           }
@@ -447,11 +540,7 @@ export function createXYReplyDispatcher(
               await sendApprovalStatusOnce();
               return;
             }
-            const resultText = text.length > 0 ? text : "工具执行完成";
-            await sendStatus(resolveTarget(), {
-              text: resultText,
-              state: "working",
-            });
+            await sendVisibleProgress(buildXYVisibleProgressText({ kind: "tool-result" }));
           }
         } catch (err) {
           error(`[TOOL RESULT] Failed to send tool result status:`, err);
@@ -460,16 +549,20 @@ export function createXYReplyDispatcher(
 
       // Reasoning/thinking process streaming callback
       onReasoningStream: async (payload: ReplyPayload) => {
+        // This callback carries private model reasoning. Surface only a
+        // generic lifecycle notice, never the private payload itself.
         const text = payload.text ?? "";
-        // Reasoning stream is received but not forwarded to A2A client
-        // (uncomment below to enable reasoning text streaming)
-        // if (text.length > 0) {
-        //   try {
-        //     await sendReasoningTextUpdate({ config, sessionId, taskId, messageId, text });
-        //   } catch (err) {
-        //     error(`[REASONING STREAM] Failed to send:`, err);
-        //   }
-        // }
+        log(`[REASONING STREAM] Received private stream, length=${text.length}`);
+        if (analysisProgressSent || text.length === 0) {
+          return;
+        }
+        analysisProgressSent = true;
+        try {
+          await sendVisibleProgress(buildXYVisibleProgressText({ kind: "analysis" }));
+        } catch (err) {
+          analysisProgressSent = false;
+          error(`[REASONING STREAM] Failed to send public progress notice:`, err);
+        }
       },
 
       // Partial reply streaming callback (real-time text streaming)
@@ -480,40 +573,13 @@ export function createXYReplyDispatcher(
         markApprovalPending({ text });
         hasSentResponse = true;
 
-        // Serialized promise chain to prevent concurrent sends
-        const prevLock = processingLock;
-        let releaseLock: () => void;
-        processingLock = new Promise<void>((resolve) => {
-          releaseLock = resolve;
-        });
-
         try {
-          await prevLock;
-
-          // Model-call boundary detection: if current text doesn't begin
-          // with what we accumulated for the current model call, we've
-          // crossed a model-call boundary.
-          if (currentModelText && !text.startsWith(currentModelText)) {
-            prevModelText += (prevModelText ? "\n" : "") + currentModelText;
-          }
-          currentModelText = text;
-
-          const sep = prevModelText ? "\n" : "";
-          const fullText = prevModelText + sep + text;
-
-          if (approvalContinuation || approvalPending) {
-            return;
-          }
-
-          await sendResponse(resolveTarget(), {
-            text: fullText,
-            append: false,
-            final: false,
-          });
+          // OpenClaw 2026.6 and 2026.7 both surface tool narration and search
+          // progress through partial replies. Keep it in XiaoYi's progress
+          // area; only deliver(kind="final") is allowed into the main body.
+          await sendVisibleProgress(text);
         } catch (err) {
           error(`[PARTIAL-REPLY] Failed to send:`, err);
-        } finally {
-          releaseLock!();
         }
       },
     } as GetReplyOptions & {
